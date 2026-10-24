@@ -107,9 +107,8 @@ def format_ts(timestamp: float) -> str:
     """Unix time -> e.g. '۲ آبان ۱۴:۴۰:۵۸' (Iran time); the year only if not this year."""
     t = dt.datetime.fromtimestamp(timestamp, IRAN_TZ)
     y, m, d = to_jalali(t.date())
-    w = weekday_name(t.date())
     year = "" if y == to_jalali(now_iran().date())[0] else f" {y}"
-    return f"{w} {d} {MONTHS[m - 1]}{year} {t:%H:%M:%S}"
+    return f"{d} {MONTHS[m - 1]}{year} {t:%H:%M:%S}"
 
 
 def format_jalali_full(date_str: str) -> str:
