@@ -105,7 +105,7 @@ class Worker:
         # Kept across task restarts so limits survive a job being re-created.
         return self.throttles.setdefault(user_id, Throttle())
 
-    def client_for(self, user_id: int) -> CullinanClient:
+    def client_for(self, user_id: int, own_lane: bool = False) -> CullinanClient:
         with db.tx() as c:
             acc = c.execute("SELECT * FROM accounts WHERE user_id = ?", (user_id,)).fetchone()
 
@@ -119,9 +119,10 @@ class Worker:
             db.log(user_id, "کپچا خوانده نشد؛ لطفاً در پنل واردش کن", "warn")
             return await captcha.manual.ask(user_id, png)
 
+        throttle = self.throttle(user_id)
         return CullinanClient(
             self.browser, acc["site_username"], security.decrypt(acc["site_password_enc"]),
-            self.throttle(user_id), solve,
+            throttle.lane() if own_lane else throttle, solve,
         )
 
     def busy(self, user_id: int) -> bool:
@@ -135,7 +136,7 @@ class Worker:
         op = self.ops[user_id] = {"title": title, "state": "running", "message": "", "started": time.time()}
 
         async def go():
-            client = self.client_for(user_id)
+            client = self.client_for(user_id, own_lane=True)
             client.interactive = True
             try:
                 op["message"] = await asyncio.wait_for(run(client), OP_TIMEOUT)
@@ -159,26 +160,31 @@ class Worker:
 
     def test_login(self, user_id: int) -> bool:
         async def run(client: CullinanClient) -> str:
+            # Stops right after a successful login: that is what the user wants to know.
             started = time.monotonic()
-            await client.check_basket()
+            await client.login()
             tries = f"، کپچا در تلاش {client.captcha_attempts} حل شد" if client.captcha_attempts > 1 else ""
-            return f"ورود موفق بود و صفحهٔ سبد غذایی باز شد ({time.monotonic() - started:.0f} ثانیه{tries})."
+            return f"ورود موفق بود ({time.monotonic() - started:.0f} ثانیه{tries})."
 
         return self.start_op(user_id, "تست ورود", run)
 
-    def fetch_menu(self, user_id: int, date: str) -> bool:
+    def fetch_menu(self, user_id: int, date: str, meal: str = "") -> bool:
         async def run(client: CullinanClient) -> str:
-            menu = await client.read_menu(date)
+            found = await client.read_menu(date, meal)
             with db.tx() as c:
+                row = c.execute("SELECT data FROM menus WHERE user_id = ? AND date = ?", (user_id, date)).fetchone()
+                # Fetching one meal updates that meal and keeps the others.
+                menu = {**json.loads(row["data"]), **found} if row and meal else found
                 c.execute(
                     "INSERT INTO menus (user_id, date, data, fetched_at) VALUES (?, ?, ?, ?) "
                     "ON CONFLICT(user_id, date) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at",
                     (user_id, date, json.dumps(menu, ensure_ascii=False), time.time()),
                 )
-            total = sum(len(foods) for foods in menu.values())
+            what = f"{meal} {date}" if meal else date
+            total = sum(len(foods) for foods in found.values())
             if not total:
-                return f"برای {date} فعلاً غذایی در سبد نیست."
-            return f"لیست غذای {date} گرفته شد ({total} غذا)."
+                return f"برای {what} فعلاً غذایی در سبد نیست."
+            return f"غذاهای {what} پیدا شد ({total} غذا)؛ تیک بزن و «شروع پیگیری» را بزن."
 
         return self.start_op(user_id, "دریافت لیست غذا", run)
 
@@ -201,6 +207,7 @@ class Worker:
                         continue
                     ran = True
                     job = Job(row["id"], row["date"], row["meal"], parse_foods(row["foods"]), row["quantity"])
+                    client.poll_interval = row["poll_seconds"] or None
                     try:
                         result = await client.attempt(job)
                         backoff = 30
@@ -231,16 +238,17 @@ class Worker:
     def _handle(user_id: int, row, result: Attempt) -> None:
         seen = "، ".join(result.seen) if result.seen else "-"
         if result.status == "bought":
-            db.set_job_status(row["id"], "done", result.message)
-            db.log(user_id, result.message, "success", row["id"])
+            n = db.count_attempt(row["id"], result.message)
+            msg = f"{result.message} (در تلاش {n})"
+            db.set_job_status(row["id"], "done", msg)
+            db.log(user_id, msg, "success", row["id"])
         elif result.status == "error":
+            n = db.count_attempt(row["id"], result.message)
             # The save may still have gone through; stop to avoid buying twice.
-            db.set_job_status(row["id"], "stopped", result.message + " — در سایت بررسی کن")
+            db.set_job_status(row["id"], "stopped", f"{result.message} (در تلاش {n}) — در سایت بررسی کن")
             db.log(user_id, result.message, "error", row["id"])
         else:
-            msg = f"{result.message} (موجود در سبد: {seen})"
-            if msg != row["message"]:
-                db.set_job_message(row["id"], msg)
+            db.count_attempt(row["id"], f"{result.message} (موجود در سبد: {seen})")
 
 
 worker = Worker()

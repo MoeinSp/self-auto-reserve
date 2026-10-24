@@ -127,7 +127,8 @@ def dashboard(request: Request):
     return _render(
         request, "dashboard.html", user=user, account=account, jobs=jobs, logs=logs,
         today=jalali.today_str(), captcha_pending=captcha.manual.pending(uid),
-        poll_seconds=config.POLL_SECONDS, op=worker.ops.get(uid), now=time.time(),
+        poll_seconds=config.POLL_SECONDS, max_per_hour=config.MAX_REQUESTS_PER_HOUR,
+        op=worker.ops.get(uid), now=time.time(),
         menu=menu, menu_date=menu_row["date"] if menu_row else None,
         menu_at=menu_row["fetched_at"] if menu_row else None,
     )
@@ -188,7 +189,7 @@ async def test_account(request: Request, site_username: str = Form(""), site_pas
 
 
 @app.post("/menu")
-async def fetch_menu(request: Request, date: str = Form(...)):
+async def fetch_menu(request: Request, date: str = Form(...), meal: str = Form("")):
     uid = _uid(request)
     if not uid:
         return _back("/login")
@@ -197,7 +198,7 @@ async def fetch_menu(request: Request, date: str = Form(...)):
         return _back("/", "تاریخ را به شکل ۱۴۰۵/۰۸/۰۵ وارد کن", request)
     if not _has_account(uid):
         return _back("/", "اول اطلاعات ورود سامانه را ذخیره کن", request)
-    if not worker.fetch_menu(uid, day):
+    if not worker.fetch_menu(uid, day, meal if meal in MEALS else ""):
         return _back("/", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
     return _back("/")
 
@@ -229,6 +230,7 @@ def create_job(
     quantity: int = Form(1),
     active_from: str = Form(""),
     active_to: str = Form(""),
+    poll_seconds: float = Form(0),
     menu_date: str = Form(""),
     picks: list[str] = Form([]),
 ):
@@ -252,21 +254,34 @@ def create_job(
         now = time.time()
         for job_meal, job_foods in wanted:
             c.execute(
-                "INSERT INTO jobs (user_id, date, meal, foods, quantity, active_from, active_to, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (uid, day, job_meal, job_foods, max(1, min(quantity, 5)), active_from, active_to, now, now),
+                "INSERT INTO jobs (user_id, date, meal, foods, quantity, active_from, active_to, poll_seconds, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (uid, day, job_meal, job_foods, max(1, min(quantity, 5)), active_from, active_to,
+                 _poll_seconds(poll_seconds), now, now),
             )
     label = "کار جدید اضافه شد" if len(wanted) == 1 else f"{len(wanted)} کار جدید (یکی برای هر وعده) اضافه شد"
     return _back("/", f"{label}؛ ربات شروع به پیگیری سبد می‌کند.", request)
 
 
+def _poll_seconds(value: float) -> float:
+    """Per-job check interval; 0 (or the default) means POLL_SECONDS."""
+    if not value or value == config.POLL_SECONDS:
+        return 0
+    return min(max(value, config.MIN_JOB_INTERVAL), 3600)
+
+
 @app.post("/jobs/{job_id}/{action}")
-def job_action(request: Request, job_id: int, action: str):
+def job_action(request: Request, job_id: int, action: str, poll_seconds: float = Form(0)):
     uid = _uid(request)
     if not uid:
         return _back("/login")
     with db.tx() as c:
-        if action == "delete":
+        if action == "speed":
+            c.execute(
+                "UPDATE jobs SET poll_seconds = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                (_poll_seconds(poll_seconds), time.time(), job_id, uid),
+            )
+        elif action == "delete":
             c.execute("DELETE FROM jobs WHERE id = ? AND user_id = ? AND status != 'active'", (job_id, uid))
         elif action in ("stop", "resume"):
             status = "stopped" if action == "stop" else "active"

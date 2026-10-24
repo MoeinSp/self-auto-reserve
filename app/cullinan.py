@@ -95,12 +95,14 @@ READ_GRID_JS = r"""
 }
 """
 
-# True while the page is still loading or an ASP.NET AJAX postback is running.
+# True while the page is still being parsed or an ASP.NET AJAX postback is
+# running. Not "complete": some subresource never finishes loading from the
+# server, so the load event comes 15-30 s late; the form works long before.
 STATE_JS = r"""
 () => {
-  if (!window.__botMark) return document.readyState !== 'complete';
+  if (!window.__botMark) return document.readyState === 'loading';
   const prm = window.Sys && Sys.WebForms && Sys.WebForms.PageRequestManager;
-  return document.readyState !== 'complete' ||
+  return document.readyState === 'loading' ||
          !!(prm && prm.getInstance().get_isInAsyncPostBack());
 }
 """
@@ -150,17 +152,33 @@ class CullinanClient:
         # On-demand runs (login test, menu fetch) a user is waiting for: space
         # requests by STEP_SECONDS only, instead of the full polling interval.
         self.interactive = False
+        self.poll_interval: float | None = None  # per-job polling interval (seconds), None = default
         self.captcha_attempts = 0  # of the last successful login, for the login test report
 
     async def _page(self) -> Page:
         if self.page is None or self.page.is_closed():
             self.context = await self.browser.new_context(locale="fa-IR", viewport={"width": 1366, "height": 900})
             await self.context.route("**/*", self._route)
+            self._watch_slow_requests(self.context)
             self.page = await self.context.new_page()
             self.page.set_default_timeout(15_000)
             self.page.set_default_navigation_timeout(30_000)
             self.page.on("dialog", self._on_dialog)
         return self.page
+
+    @staticmethod
+    def _watch_slow_requests(context: BrowserContext) -> None:
+        """Log requests slower than 3 s (without query strings) to find what stalls pages."""
+        started: dict = {}
+
+        def done(req):
+            t = started.pop(req, None)
+            if t is not None and time.monotonic() - t > 3:
+                log.info("slow request (%.1fs, %s): %s", time.monotonic() - t, req.resource_type, req.url.split("?")[0][:150])
+
+        context.on("request", lambda req: started.__setitem__(req, time.monotonic()))
+        context.on("requestfinished", done)
+        context.on("requestfailed", done)
 
     @staticmethod
     async def _route(route: Route) -> None:
@@ -182,13 +200,13 @@ class CullinanClient:
         self.context = self.page = None
 
     async def _settle(self, page: Page) -> None:
-        # Pages are server-rendered, so "load" is enough; "network idle" is only a
-        # short best effort because some pages keep a request open (polling).
-        for state, timeout in (("load", 15_000), ("networkidle", 2_000)):
-            try:
-                await page.wait_for_load_state(state, timeout=timeout)
-            except Exception:
-                pass
+        # Pages are server-rendered: once parsed (domcontentloaded, which goto
+        # already waited for) the form is usable. "Network idle" is only a short
+        # best effort, because a subresource or a poll may never finish.
+        try:
+            await page.wait_for_load_state("networkidle", timeout=1_500)
+        except Exception:
+            pass
 
     async def _postback(self, page: Page, action: Callable[[], Awaitable]) -> None:
         """Run an action that may post back, and wait until the page is stable.
@@ -240,7 +258,7 @@ class CullinanClient:
 
     async def _goto(self, url: str, step: bool = False) -> Page:
         page = await self._page()
-        await self.throttle.wait(step=step or self.interactive)
+        await self.throttle.wait(step=step or self.interactive, interval=self.poll_interval)
         await page.goto(url, wait_until="domcontentloaded")
         await self._settle(page)
         return page
@@ -386,8 +404,8 @@ class CullinanClient:
         if await self._on_login_page(page):
             raise SiteError("ورود انجام شد ولی صفحهٔ سبد غذایی باز نشد")
 
-    async def read_menu(self, date: str) -> dict[str, list[str]]:
-        """Foods offered on `date`, per meal. Read-only: nothing is ticked or saved."""
+    async def read_menu(self, date: str, meal: str = "") -> dict[str, list[str]]:
+        """Foods offered on `date`, per meal (only `meal` if given). Read-only: nothing is ticked or saved."""
         self.dialogs.clear()
         page = await self.open_basket(date)
         grid = await self.read_grid(page)
@@ -401,6 +419,8 @@ class CullinanClient:
             return {"": _food_names(slot["food"])}
         menu = {}
         for opt in _real_options(meal_filter):
+            if meal and not matches(opt["text"], meal):
+                continue
             if not opt["selected"]:
                 await self._select(page, meal_filter, opt["value"])
             slot = self._slot(await self.read_grid(page), index)

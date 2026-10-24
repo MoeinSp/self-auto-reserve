@@ -1,13 +1,14 @@
 {% extends "base.html" %}
 {% block head %}
-{% if op and op.state == 'running' %}
+{% set watching = jobs|selectattr('status', 'equalto', 'active')|list %}
+{% if (op and op.state == 'running') or watching %}
 <script>
-  // Refresh until the background operation finishes, but never while the user is typing.
+  // Keep the status and attempt counters fresh, but never reload while the user is typing.
   setTimeout(function check() {
     var el = document.activeElement;
     if (el && /INPUT|TEXTAREA|SELECT/.test(el.tagName)) return setTimeout(check, 3000);
     location.reload();
-  }, 4000);
+  }, {{ 4000 if op and op.state == 'running' else 10000 }});
 </script>
 {% endif %}
 {% endblock %}
@@ -81,9 +82,13 @@
   <section class="card">
     <div class="card-head"><span class="step">۲</span><h2>خرید خودکار از سبد غذایی</h2></div>
     <form method="post" action="/jobs">
+      {% set menu_meal = (menu|list)[0] if menu and menu|length == 1 else '' %}
       <div class="row">
         <label>تاریخ <input name="date" value="{{ menu_date or today }}" required placeholder="1405/08/05" dir="ltr"></label>
-        <button class="secondary" formaction="/menu" formnovalidate {% if op and op.state == 'running' %}disabled{% endif %}>دریافت لیست غذا</button>
+        <label>وعده
+          <select name="meal">{% for m in MEALS %}<option value="{{ m }}"{% if m and m == menu_meal %} selected{% endif %}>{{ m or 'فرقی نمی‌کند' }}</option>{% endfor %}</select>
+        </label>
+        <button class="secondary" formaction="/menu" formnovalidate {% if op and op.state == 'running' %}disabled{% endif %}>پیدا کردن غذاها</button>
       </div>
 
       {% if menu %}
@@ -101,16 +106,13 @@
         </fieldset>
         {% endfor %}
       </div>
-      <p class="muted small">هر وعده‌ای که تیک بزنی یک کار جدا می‌شود. اگر در یک وعده چند غذا تیک بزنی، هر کدام زودتر موجود شود خریده می‌شود (اولویت با بالایی).</p>
+      <p class="muted small">هر وعده‌ای که تیک بزنی یک کار جدا می‌شود (مثلاً یکی ناهار و یکی شام). اگر در یک وعده چند غذا تیک بزنی، هر کدام زودتر موجود شود خریده می‌شود (اولویت با بالایی).</p>
       {% else %}
-      <div class="empty">تاریخ را وارد کن و «دریافت لیست غذا» را بزن؛ غذاهای هر وعده می‌آید و فقط تیک می‌زنی.</div>
+      <div class="empty">تاریخ و وعده را انتخاب کن و «پیدا کردن غذاها» را بزن؛ غذاهای آن وعده (یا همهٔ وعده‌ها با «فرقی نمی‌کند») می‌آید و فقط تیک می‌زنی.</div>
       {% endif %}
 
-      <details class="manual"{% if not menu %} open{% endif %}>
-        <summary>نوشتن دستی نام غذا</summary>
-        <label>وعده
-          <select name="meal">{% for m in MEALS %}<option value="{{ m }}">{{ m or 'فرقی نمی‌کند' }}</option>{% endfor %}</select>
-        </label>
+      <details class="manual">
+        <summary>نوشتن دستی نام غذا (برای وعدهٔ انتخاب‌شده در بالا)</summary>
         <label>غذاهای دلخواه — هر خط یکی، به ترتیب اولویت (<code>*</code> = هر غذایی)
           <textarea name="foods" rows="3" placeholder="جوجه کباب&#10;چلو کباب&#10;*"></textarea>
         </label>
@@ -119,10 +121,13 @@
 
       <div class="row">
         <label>تعداد <input name="quantity" type="number" min="1" max="5" value="1"></label>
+        <label>هر چند ثانیه چک کند <input name="poll_seconds" type="number" min="1" step="0.5" value="{{ poll_seconds|int }}"></label>
+      </div>
+      <div class="row">
         <label>فقط از ساعت <input name="active_from" type="time"></label>
         <label>تا ساعت <input name="active_to" type="time"></label>
       </div>
-      <p class="note">هر حدود {{ poll_seconds|int }} ثانیه یک بار سبد چک می‌شود (با تأخیر تصادفی و سقف ساعتی، تا حساب مسدود نشود).</p>
+      <p class="note">پیش‌فرض هر {{ poll_seconds|int }} ثانیه است. سرعت بالا (مثلاً ۱ یا ۲ ثانیه) سقف {{ max_per_hour }} درخواست در ساعت را زود پر می‌کند و بعدش ربات تا آزاد شدن سقف صبر می‌کند؛ بهتر است سرعت بالا را فقط با «از ساعت / تا ساعت» برای زمان باز شدن سبد بگذاری.</p>
       <button class="block">شروع پیگیری</button>
     </form>
   </section>
@@ -142,10 +147,19 @@
       <div>
         <div class="job-foods">{{ j.foods.splitlines()|join('، ') }} <span class="qty">×{{ j.quantity }}</span></div>
         <span class="badge {{ j.status }}">{{ STATUS_FA[j.status] }}</span>
+        <span class="job-meta">
+          {% if j.attempts %}تلاش {{ j.attempts }}{% else %}هنوز بررسی نشده{% endif %}
+          · هر {{ (j.poll_seconds or poll_seconds)|round(1)|replace('.0', '') }} ثانیه
+          {% if j.last_check %}· آخرین بررسی <span dir="ltr">{{ j.last_check|ts }}</span>{% endif %}
+        </span>
         {% if j.message %}<div class="job-msg">{{ j.message }}</div>{% endif %}
       </div>
       <div class="actions">
         {% if j.status == 'active' %}
+          <form method="post" action="/jobs/{{ j.id }}/speed" class="speed" title="فاصلهٔ بین بررسی‌ها (ثانیه)">
+            <input name="poll_seconds" type="number" min="1" step="0.5" value="{{ (j.poll_seconds or poll_seconds)|round(1)|replace('.0', '') }}" aria-label="ثانیه">
+            <button class="link">تغییر سرعت</button>
+          </form>
           <form method="post" action="/jobs/{{ j.id }}/stop"><button class="link">توقف</button></form>
         {% else %}
           {% if j.status != 'done' %}<form method="post" action="/jobs/{{ j.id }}/resume"><button class="link">ادامه</button></form>{% endif %}

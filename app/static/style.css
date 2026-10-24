@@ -154,6 +154,9 @@ code { background: var(--bg-2); padding: 0 6px; border-radius: 6px; font-family:
 .job-foods { font-weight: 600; }
 .job-foods .qty { color: var(--muted); font-weight: 400; }
 .job-msg { font-size: 12px; color: var(--muted); }
+.job-meta { font-size: 12px; color: var(--muted); margin-right: 6px; }
+.actions .speed { display: flex; gap: 4px; align-items: center; }
+.actions .speed input { width: 64px; margin: 0; padding: 4px 8px; font-size: 13px; text-align: center; }
 .actions { display: flex; gap: 2px; white-space: nowrap; }
 .actions form { margin: 0; }
 @media (max-width: 560px) {

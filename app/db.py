@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     active_to TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'active', -- active | done | stopped | failed
     message TEXT NOT NULL DEFAULT '',
+    poll_seconds REAL NOT NULL DEFAULT 0,  -- seconds between checks (0 = POLL_SECONDS)
+    attempts INTEGER NOT NULL DEFAULT 0,   -- basket checks done so far
+    last_check REAL NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -72,9 +75,30 @@ def tx():
         conn.close()
 
 
+# Columns added after the first release: (table, column, definition).
+MIGRATIONS = [
+    ("jobs", "poll_seconds", "REAL NOT NULL DEFAULT 0"),
+    ("jobs", "attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("jobs", "last_check", "REAL NOT NULL DEFAULT 0"),
+]
+
+
 def init() -> None:
     with tx() as c:
         c.executescript(SCHEMA)
+        for table, column, definition in MIGRATIONS:
+            if column not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def count_attempt(job_id: int, message: str) -> int:
+    """Record one basket check for a job; returns the attempt number."""
+    with tx() as c:
+        c.execute(
+            "UPDATE jobs SET attempts = attempts + 1, last_check = ?, message = ?, updated_at = ? WHERE id = ?",
+            (time.time(), message, time.time(), job_id),
+        )
+        return c.execute("SELECT attempts FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
 
 
 def log(user_id: int, message: str, level: str = "info", job_id: int | None = None) -> None:

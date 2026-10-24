@@ -25,6 +25,9 @@ INVITE_CODE = _env("INVITE_CODE", "")
 # date/meal, read the food list) for one account. Clamped to the floor.
 MIN_POLL_FLOOR = 5.0
 POLL_SECONDS = max(MIN_POLL_FLOOR, float(_env("POLL_SECONDS", "20")))
+# A user may pick a faster interval for one job in the panel, down to this.
+# The hourly cap below still applies, so fast jobs pause once it is reached.
+MIN_JOB_INTERVAL = 1.0
 # Seconds between postbacks inside one round (pick date -> pick meal -> save).
 MIN_STEP_FLOOR = 1.0
 STEP_SECONDS = max(MIN_STEP_FLOOR, float(_env("STEP_SECONDS", "1.5")))

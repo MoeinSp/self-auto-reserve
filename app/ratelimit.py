@@ -42,16 +42,32 @@ class Throttle:
         if len(hits) >= cap:
             raise RateLimited(3600 - (now - hits[0]) + 1)
 
-    async def wait(self, step: bool = False) -> None:
+    def lane(self) -> "Throttle":
+        """A throttle with its own spacing that shares this one's hourly caps.
+
+        Used for on-demand runs (login test, menu fetch) so they don't queue
+        behind a job's polling interval, while still counting toward the caps.
+        """
+        other = Throttle(self.min_interval, self.step_interval, self.jitter, self.per_hour, self.logins_per_hour)
+        other._hits, other._logins = self._hits, self._logins
+        return other
+
+    async def wait(self, step: bool = False, interval: float | None = None) -> None:
         """Call before every request (page load / postback) to the site.
 
         A new polling round (step=False) waits the full poll interval since the
-        previous request; follow-up postbacks inside the same round
+        previous request (`interval` overrides it per job, never below
+        MIN_JOB_INTERVAL); follow-up postbacks inside the same round
         (step=True) only wait the short STEP_SECONDS gap.
         """
         async with self._lock:
             self._check_window(self._hits, self.per_hour)
-            base = self.step_interval if step else self.min_interval
+            if step:
+                base = self.step_interval
+            elif interval:
+                base = max(config.MIN_JOB_INTERVAL, interval)
+            else:
+                base = self.min_interval
             gap = base * (1 + random.uniform(0, self.jitter))
             delay = self._last + gap - time.monotonic()
             if delay > 0:

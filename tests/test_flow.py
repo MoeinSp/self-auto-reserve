@@ -92,6 +92,13 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(menu, {"صبحانه": [], "ناهار": ["جوجه کباب", "خوراک مرغ"], "شام": ["عدس پلو"]})
         self.assertEqual(fake_site.PURCHASES, [])
 
+    async def test_reads_menu_for_one_meal(self):
+        fake_site.STOCK["1405/08/05"] = {"ناهار": {"جوجه کباب": 2}, "شام": {"عدس پلو": 3, "کوکو": 1}}
+        c = self.client()
+        menu = await c.read_menu("1405/08/05", "شام")
+        await c.close()
+        self.assertEqual(menu, {"شام": ["عدس پلو", "کوکو"]})
+
     async def test_check_basket_is_quick(self):
         # Real throttle settings: an on-demand test must not wait the polling interval.
         self.throttle = Throttle()
@@ -136,6 +143,42 @@ class UnitTest(unittest.TestCase):
                 await t.wait()
 
         asyncio.run(run())
+
+    def test_lane_has_own_spacing_but_shared_cap(self):
+        from app.ratelimit import RateLimited
+
+        async def run():
+            t = Throttle(per_hour=3)
+            t.min_interval, t.jitter = 30, 0
+            lane = t.lane()
+            await t.wait()
+            start = time.monotonic()
+            await lane.wait(step=True)  # does not queue behind t's 30 s interval
+            self.assertLess(time.monotonic() - start, 3)
+            await lane.wait(step=True)
+            with self.assertRaises(RateLimited):  # 3 requests in total hit the shared cap
+                await t.wait()
+
+        asyncio.run(run())
+
+    def test_db_migration_and_attempts(self):
+        import sqlite3
+
+        from app import db
+
+        conn = sqlite3.connect(config.DB_PATH)
+        conn.executescript(
+            "DROP TABLE IF EXISTS jobs; CREATE TABLE jobs (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, "
+            "date TEXT NOT NULL, meal TEXT NOT NULL DEFAULT '', foods TEXT NOT NULL, quantity INTEGER NOT NULL DEFAULT 1, "
+            "active_from TEXT NOT NULL DEFAULT '', active_to TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', "
+            "message TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, updated_at REAL NOT NULL);"
+            "INSERT INTO jobs (user_id, date, foods, created_at, updated_at) VALUES (1, '1405/08/05', '*', 0, 0);"
+        )
+        conn.commit()
+        conn.close()
+        db.init()  # adds the new columns to the old table
+        self.assertEqual(db.count_attempt(1, "x"), 1)
+        self.assertEqual(db.count_attempt(1, "y"), 2)
 
     def test_background_endpoints_run_on_event_loop(self):
         # Sync endpoints run in a thread pool, where starting the background task fails.
