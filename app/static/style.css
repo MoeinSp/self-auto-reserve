@@ -340,40 +340,105 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 0 16
 }
 
 /* ------------------------------------------------------------- account finance */
-.account-finance-bar {
-  display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;
+.account-finance-card {
   background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 14px 18px; margin: 12px 0 20px; box-shadow: var(--shadow);
+  padding: 18px 20px; margin: 14px 0 24px; box-shadow: var(--shadow);
 }
-.finance-info { display: flex; flex-direction: column; gap: 2px; }
-.finance-title { font-size: 14px; display: flex; align-items: center; gap: 8px; }
-.credit-amount { font-size: 18px; color: var(--ok); font-weight: 700; }
-.finance-time { font-size: 11px; color: var(--muted); }
-.finance-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.charge-btn {
-  display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px;
+.finance-header {
+  display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;
+}
+.finance-status {
+  display: flex; align-items: center; gap: 14px;
+}
+.finance-icon {
+  display: grid; place-items: center; width: 44px; height: 44px; border-radius: 12px;
+  background: var(--ok-soft); font-size: 22px; flex: none;
+}
+.finance-label { font-size: 13px; color: var(--muted); }
+.credit-amount strong {
+  font-size: 22px; color: var(--ok); font-weight: 800; line-height: 1.2; display: inline-block;
+}
+.credit-not-synced {
+  font-size: 14px; color: var(--warn); background: var(--warn-soft); padding: 2px 8px; border-radius: 6px;
+}
+.finance-time { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.finance-btns { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.charge-toggle-btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 7px 16px;
   background: linear-gradient(135deg, #10b981, #059669); color: #fff !important;
-  border-radius: 99px; text-decoration: none; font-weight: 700; font-size: 12px;
+  border-radius: 10px; font-weight: 700; font-size: 13px; border: none; cursor: pointer;
   box-shadow: 0 2px 8px rgba(5, 150, 105, .3); transition: filter .15s;
 }
-.charge-btn:hover { filter: brightness(1.1); }
+.charge-toggle-btn:hover { filter: brightness(1.1); }
 .chip-credit {
-  display: block; font-size: 11px; color: var(--ok); font-weight: 600; margin-top: 2px;
+  display: block; font-size: 11px; color: var(--ok); font-weight: 700; margin-top: 2px;
+}
+
+/* ------------------------------------------------------------- charge drawer */
+.charge-drawer {
+  margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--line);
+  background: var(--bg); border-radius: 12px; padding: 16px;
+}
+.charge-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+}
+@media (max-width: 680px) { .charge-grid { grid-template-columns: 1fr; } }
+.quick-amounts {
+  display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px;
+}
+.amt-btn {
+  padding: 3px 8px; font-size: 11px; border-radius: 6px; background: var(--bg-2);
+  border: 1px solid var(--line); color: var(--text); cursor: pointer; font-family: inherit;
+}
+.amt-btn:hover { border-color: var(--ok); }
+.pay-submit-btn {
+  background: linear-gradient(135deg, #10b981, #047857); color: #fff; font-weight: 700;
+  padding: 10px 24px; border-radius: 10px; font-size: 14px;
+}
+
+/* ------------------------------------------------------------- payment callout */
+.payment-callout {
+  display: flex; flex-direction: column; gap: 10px; align-items: flex-start;
+  padding: 12px; background: var(--ok-soft); border-radius: 10px; margin-top: 6px;
+}
+.direct-pay-link {
+  display: inline-block; padding: 10px 20px; background: linear-gradient(135deg, #059669, #047857);
+  color: #fff !important; text-decoration: none; border-radius: 10px; font-weight: 800; font-size: 14px;
+  box-shadow: 0 4px 14px rgba(4, 120, 87, .35); animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+  100% { transform: scale(1); }
+}
+
+/* ------------------------------------------------------------- main dashboard grid */
+.dashboard-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: stretch;
+}
+@media (max-width: 820px) {
+  .dashboard-grid { grid-template-columns: 1fr; gap: 16px; }
+}
+.dashboard-grid > .card {
+  margin-bottom: 0; display: flex; flex-direction: column;
+}
+.dashboard-grid > .card form {
+  display: flex; flex-direction: column; flex: 1;
 }
 
 /* ------------------------------------------------------------- date pills */
 .date-picker-block { margin-bottom: 14px; }
 .date-label-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 13px; }
-.selected-weekday-badge { font-weight: 600; color: var(--accent); background: var(--accent-soft); padding: 2px 8px; border-radius: 6px; }
+.selected-weekday-badge { font-weight: 700; color: var(--accent); background: var(--accent-soft); padding: 3px 10px; border-radius: 6px; }
 .date-pills {
-  display: flex; gap: 6px; overflow-x: auto; padding-bottom: 8px; margin-bottom: 8px;
-  -webkit-overflow-scrolling: touch; scrollbar-width: thin;
+  display: flex; gap: 6px; overflow-x: auto; padding: 4px 2px 8px; margin-bottom: 8px;
+  -webkit-overflow-scrolling: touch; scrollbar-width: thin; scroll-snap-type: x mandatory;
 }
 .date-pill {
   flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 2px;
-  padding: 6px 12px; border-radius: 12px; border: 1px solid var(--line);
+  padding: 6px 12px; border-radius: 10px; border: 1px solid var(--line);
   background: var(--bg-2); color: var(--text); cursor: pointer; transition: all .15s ease;
-  font-family: inherit; font-size: 12px;
+  font-family: inherit; font-size: 12px; min-width: 64px; scroll-snap-align: start;
 }
 .date-pill:hover { border-color: var(--accent); background: var(--card); }
 .date-pill.selected {
@@ -386,22 +451,24 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 0 16
 .date-pill.selected .pill-tag { background: rgba(255,255,255,.3); }
 
 /* ------------------------------------------------------------- auto-reserve & forgot receipt */
-.auto-reserve-card, .forgot-receipt-card {
-  margin-top: 20px;
-}
 .auto-reserve-toggle {
   background: var(--bg-2); padding: 10px 14px; border-radius: 10px; margin-bottom: 12px;
 }
 .switch-label {
   display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px;
 }
+.switch-label input[type=checkbox] { width: auto; margin: 0; }
 .meals-row {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
 }
 .pick-inline {
   display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer;
 }
+.pick-inline input[type=checkbox] { width: auto; margin: 0; }
 .auto-reserve-footer {
   display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
-  padding-top: 10px; border-top: 1px solid var(--line);
+  margin-top: auto; padding-top: 14px; border-top: 1px solid var(--line);
+}
+.form-footer-action {
+  margin-top: auto; padding-top: 14px;
 }

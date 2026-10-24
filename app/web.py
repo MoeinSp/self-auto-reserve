@@ -139,7 +139,7 @@ def dashboard(request: Request):
             request.session.clear()
             return _back("/login")
         accounts = c.execute(
-            "SELECT id, site_username, display_name, created_at FROM accounts WHERE user_id = ? ORDER BY id",
+            "SELECT * FROM accounts WHERE user_id = ? ORDER BY id",
             (uid,),
         ).fetchall()
         active_account, active_id = _get_active_account(request, accounts)
@@ -384,6 +384,88 @@ async def get_forgot_receipt_endpoint(
     if not worker.fetch_forgot_receipt(uid, account_id, day, meal if meal in MEALS else ""):
         return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
     return _back(f"/?account={account_id}")
+
+
+@app.post("/account/pay")
+async def request_pay(
+    request: Request,
+    account_id: int = Form(...),
+    amount: str = Form(...),
+    unit: str = Form("toman"),
+    bank: int = Form(1),
+):
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    account_id = int(account_id) if str(account_id).isdigit() else 0
+    clean_amt = re.sub(r"[^\d]", "", norm(amount))
+    if not clean_amt or int(clean_amt) <= 0:
+        return _back(f"/?account={account_id}", "مبلغ افزایش اعتبار را به درستی وارد کن.", request)
+    amt_int = int(clean_amt)
+    amount_rials = amt_int * 10 if unit == "toman" else amt_int
+    if amount_rials < 10000:
+        return _back(f"/?account={account_id}", "حداقل مبلغ پرداخت ۱۰,۰۰۰ ریال است.", request)
+
+    with db.tx() as c:
+        acc = c.execute("SELECT id FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
+    if not acc:
+        return _back("/", "حساب پیدا نشد.", request)
+
+    request.session["active_account_id"] = account_id
+    if not worker.request_payment_gateway(uid, account_id, amount_rials, int(bank)):
+        return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+    return _back(f"/?account={account_id}")
+
+
+@app.get("/pay/gateway/{token}", response_class=HTMLResponse)
+def gateway_redirect(token: str):
+    sess = worker.PAYMENT_SESSIONS.get(token)
+    if not sess or (time.time() - sess.get("created_at", 0) > 1800):
+        return HTMLResponse(
+            """<!DOCTYPE html><html dir="rtl" lang="fa"><head><meta charset="utf-8">
+            <style>body{font-family:sans-serif;text-align:center;padding:50px;background:#f7f3ec;color:#1d2125}</style>
+            </head><body>
+            <h2>لینک پرداخت منقضی شده یا نامعتبر است</h2>
+            <p>لطفاً دوباره از پنل درخواست درگاه را ثبت کنید.</p>
+            <a href="/" style="display:inline-block;padding:10px 20px;background:#d98a00;color:#fff;text-decoration:none;border-radius:8px">بازگشت به پنل</a>
+            </body></html>""",
+            status_code=404,
+        )
+
+    action = sess["action"]
+    fields = sess.get("fields", {})
+    bank = sess.get("bank", "درگاه شاپرک")
+    amt_str = f"{sess.get('amount_rials', 0):,} ریال"
+
+    inputs_html = "\n".join(f'<input type="hidden" name="{k}" value="{v}">' for k, v in fields.items())
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html dir="rtl" lang="fa">
+<head>
+  <meta charset="utf-8">
+  <title>انتقال امن به {bank}...</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {{ font-family: Tahoma, sans-serif; text-align: center; padding: 40px 16px; background: #f7f3ec; color: #1d2125; }}
+    .box {{ max-width: 440px; margin: 40px auto; background: #fff; padding: 30px 24px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,.08); }}
+    .spinner {{ width: 40px; height: 40px; border: 4px solid #e7dfd2; border-top-color: #10b981; border-radius: 50%; animation: spin 1s linear infinite; margin: 20px auto; }}
+    @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+    .btn {{ display: inline-block; padding: 12px 24px; background: #10b981; color: #fff; text-decoration: none; border-radius: 10px; font-weight: bold; border: none; cursor: pointer; font-family: inherit; }}
+  </style>
+</head>
+<body onload="setTimeout(function(){{ document.getElementById('payForm').submit(); }}, 500)">
+  <div class="box">
+    <div class="spinner"></div>
+    <h3>در حال اتصال امن به {bank} (شاپرک)</h3>
+    <p>مبلغ: <strong>{amt_str}</strong></p>
+    <p style="font-size:13px;color:#6b6f76">تا چند لحظه دیگر به درگاه پرداخت بانکی منتقل می‌شوید...</p>
+    <form id="payForm" method="POST" action="{action}">
+      {inputs_html}
+      <noscript><button type="submit" class="btn">ورود به درگاه بانکی</button></noscript>
+    </form>
+    <button type="button" class="btn" style="margin-top:10px" onclick="document.getElementById('payForm').submit()">اگر منتقل نشدید، اینجا کلیک کنید</button>
+  </div>
+</body>
+</html>""")
 
 
 @app.post("/menu")

@@ -52,6 +52,9 @@ def _explain(exc: Exception) -> str:
     return "خطای غیرمنتظره رخ داد؛ اگر تکرار شد به مدیر پنل خبر بده."
 
 
+PAYMENT_SESSIONS: dict[str, dict] = {}
+
+
 class Worker:
     def __init__(self):
         self.tasks: dict[int, asyncio.Task] = {}  # account_id -> task
@@ -283,6 +286,26 @@ class Worker:
             return f"رزرو خودکار هفته {target} انجام شد: {summary}"
 
         return self.start_op(user_id, "رزرو خودکار هفته بعد", run, account_id=account_id)
+
+    def request_payment_gateway(self, user_id: int, account_id: int, amount_rials: int, bank_idx: int = 1) -> bool:
+        async def run(client: CullinanClient) -> str:
+            await client.login()
+            data = await client.create_payment_session(amount_rials, bank_idx)
+            import secrets
+            token = secrets.token_urlsafe(16)
+            PAYMENT_SESSIONS[token] = {
+                "action": data["action"],
+                "method": data.get("method", "POST"),
+                "fields": data.get("fields", {}),
+                "bank": data.get("bank", "درگاه پرداخت"),
+                "amount_rials": amount_rials,
+                "created_at": time.time(),
+            }
+            gateway_url = f"/pay/gateway/{token}"
+            db.log(user_id, f"💳 لینک درگاه {data.get('bank')} برای مبلغ {amount_rials:,} ریال ایجاد شد.", "info")
+            return f"PAYMENT_READY:{gateway_url}:{data.get('bank')}:{amount_rials}"
+
+        return self.start_op(user_id, "ایجاد لینک درگاه پرداخت", run, account_id=account_id)
 
     def fetch_menu(self, user_id: int, account_id: int, date: str, meal: str = "") -> bool:
         async def run(client: CullinanClient) -> str:

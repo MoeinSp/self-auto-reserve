@@ -611,68 +611,135 @@ class CullinanClient:
         """Fetch forgot card receipt code from Reservation/ForgotReceipt.aspx."""
         page = await self._open("Reservation/ForgotReceipt.aspx")
 
-        # 1) Date input
-        date_input = page.locator("[id$='txtDate'], input[name*='txtDate']").first
+        # 1) Set date in #cphMain_txtDate
+        date_input = page.locator("#cphMain_txtDate, input[name$='txtDate']").first
         if await date_input.count() > 0:
-            val = norm(await date_input.input_value())
-            if val != date:
-                await date_input.fill(date)
-                go_btn = page.locator("[id$='imgbtnGoToDate'], [id*='GoToDate']").first
-                if await go_btn.count() > 0:
-                    await self.throttle.wait(step=True)
-                    await self._postback(page, go_btn.click)
+            await date_input.evaluate("(el, v) => el.value = v", date)
 
-        # 2) Meal dropdown
-        for meal_sel in ("[id$='drpFoodType']", "[id$='drpMeal']", "select[name*='Meal']"):
-            loc = page.locator(meal_sel).first
-            if await loc.count() > 0:
-                opts = [norm(t) for t in await loc.locator("option").all_inner_texts()]
-                for o in opts:
-                    if meal and (meal in o or o in meal):
-                        await loc.select_option(label=o)
-                        break
+        # 2) Set reserve type (0 = هفتگی, 2 = سبد غذایی)
+        res_type = page.locator("#cphMain_drpReserveType, select[name$='drpReserveType']").first
+        if await res_type.count() > 0:
+            await res_type.select_option(value="0")
 
-        # 3) Submit / row button
-        row_btn = page.locator("input[value*='فیش'], button:has-text('فیش'), a:has-text('فیش')").first
-        if await row_btn.count() > 0:
-            await self.throttle.wait(step=True)
-            await self._postback(page, row_btn.click)
-        else:
-            submit_btn = page.locator("[id$='btnSave'], [id$='btnShow'], [id$='btnReceipt'], input[type=submit]").first
-            if await submit_btn.count() > 0:
-                await self.throttle.wait(step=True)
-                await self._postback(page, submit_btn.click)
+        # 3) Set meal dropdown (1=صبحانه, 2=ناهار, 3=شام)
+        meal_sel = page.locator("#cphMain_drpFoodType, select[name$='drpFoodType']").first
+        if await meal_sel.count() > 0:
+            meal_val = "1" if "صبحانه" in meal else ("3" if "شام" in meal else "2")
+            await meal_sel.select_option(value=meal_val)
 
-        # 4) Extract receipt code
-        body_text = norm(await page.inner_text("body"))
+        # 4) Submit with #cphMain_btnOk (value="تأیید")
+        btn = page.locator("#cphMain_btnOk, input[name$='btnOk'], input[type=submit][value*='تأیید']").first
+        if await btn.count() == 0:
+            raise SiteError("دکمهٔ تأیید فیش فراموشی پیدا نشد")
+
+        await self.throttle.wait(step=True)
+        await self._postback(page, btn.click)
+
+        # 5) Read alertBoxValue and messageBoxValue
+        alert_box = page.locator("#cphMain_alertBoxValue").first
+        alert_text = norm(await alert_box.inner_text()) if await alert_box.count() > 0 else ""
+
+        msg_box = page.locator("#cphMain_messageBoxValue").first
+        msg_text = norm(await msg_box.inner_text()) if await msg_box.count() > 0 else ""
+
+        full_text = " ".join(filter(None, [alert_text, msg_text, " ".join(self.dialogs[-2:])]))
+
         code = ""
-        for code_sel in ("[id$='lblBarcode']", "[id$='lblReceiptCode']", "[id$='lblFish']", "[id$='lblCode']", ".receipt-code"):
-            loc = page.locator(code_sel).first
-            if await loc.count() > 0:
-                c_text = norm(await loc.inner_text()).strip()
-                if c_text and any(ch.isdigit() for ch in c_text):
-                    code = c_text
-                    break
-
-        if not code:
-            patterns = [
-                r"(?:کد|شماره)\s*(?:فیش|فراموشی|ژتون|بارکد)\s*[:=\-]?\s*(\d{4,12})",
-                r"(\d{5,10})",
-            ]
+        patterns = [
+            r"(?:کد|شماره)\s*(?:فیش|فراموشی|ژتون|بارکد)\s*[:=\-]?\s*(\d{4,10})",
+            r"(\d{4,8})",
+        ]
+        if "موفق" in full_text or "کد" in full_text or "فیش" in full_text or not any(h in full_text for h in ("غیرفعال", "خطا", "یافت نشد", "ندارید", "خارج از بازه")):
             for pat in patterns:
-                m = re.search(pat, body_text)
+                m = re.search(pat, alert_text or full_text)
                 if m:
                     code = m.group(1)
                     break
 
-        page_msg = norm(" ".join(self.dialogs[-2:]) + " " + await self._text(page, SEL["page_message"]))
         return {
             "success": bool(code),
             "code": code,
-            "message": page_msg or ("کد فیش دریافت شد" if code else "فیشی برای این تاریخ یا وعده صادر نشد یا رزروی موجود نیست"),
+            "message": alert_text or msg_text or full_text or ("کد فیش با موفقیت صادر شد" if code else "پاسخی از سامانه دریافت نشد"),
             "date": date,
             "meal": meal,
         }
+
+    async def create_payment_session(self, amount_rials: int, bank_idx: int = 1) -> dict:
+        """Navigate to ePay/ePay_Payment.aspx, enter amount, click bank logo,
+        and capture the direct bank gateway redirection / form data.
+        bank_idx: 0 = Sadad (Melli), 1 = BehPardakht (Mellat)
+        """
+        page = await self._open("ePay/ePay_Payment.aspx")
+
+        # Inject interceptor hooks into the page for bank redirect functions
+        await page.evaluate("""
+            () => {
+                window.__paymentData = null;
+                window.postToBehPardakht = function(refId) {
+                    window.__paymentData = {
+                        action: "https://bpm.shaparak.ir/pgwchannel/startpay.mellat",
+                        method: "POST",
+                        fields: { RefId: refId },
+                        bank: "به پرداخت ملت"
+                    };
+                };
+                window.postToSadad = function(merchantId, terminalId, timeStamp, amount, paymentId, FP, revertURL) {
+                    window.__paymentData = {
+                        action: "https://sadad.shaparak.ir/purchase",
+                        method: "POST",
+                        fields: {
+                            CardAcqID: merchantId,
+                            AmountTrans: amount,
+                            ORDERID: paymentId,
+                            TerminalID: terminalId,
+                            TimeStamp: timeStamp,
+                            FP: FP,
+                            RedirectURL: revertURL
+                        },
+                        bank: "سداد (بانک ملی)"
+                    };
+                };
+                window.postToSamanKish = function(token) {
+                    window.__paymentData = {
+                        action: "https://sep.shaparak.ir/OnlinePG/OnlinePG",
+                        method: "POST",
+                        fields: { Token: token },
+                        bank: "سامان کیش"
+                    };
+                };
+            }
+        """)
+
+        # Set payment amount
+        amount_str = f"{amount_rials:,}"
+        amt_input = page.locator("#cphMain_txtPaymentAmount, input[name$='txtPaymentAmount']").first
+        if await amt_input.count() == 0:
+            raise SiteError("فیلد مبلغ در صفحه پرداخت پیدا نشد")
+        await amt_input.evaluate("(el, v) => el.value = v", amount_str)
+
+        # Select bank button: #cphMain_dataLstBank_imgBankLogo_0 (Sadad) or _1 (Mellat)
+        bank_sel = f"#cphMain_dataLstBank_imgBankLogo_{bank_idx}"
+        btn = page.locator(bank_sel).first
+        if await btn.count() == 0:
+            btn = page.locator("#cphMain_dataLstBank input[type=image]").first
+        if await btn.count() == 0:
+            raise SiteError("درگاه بانکی در صفحه یافت نشد")
+
+        await self.throttle.wait(step=True)
+        await btn.click()
+
+        # Wait for __paymentData to be populated
+        for _ in range(25):
+            data = await page.evaluate("() => window.__paymentData")
+            if data and data.get("action"):
+                data["amount_rials"] = amount_rials
+                return data
+            await asyncio.sleep(0.2)
+
+        alert = norm(await self._text(page, "#cphMain_alertBoxValue, #cphMain_messageBoxValue"))
+        if alert:
+            raise SiteError(f"خطای سامانه در اتصال به درگاه: {alert}")
+        raise SiteError("درگاه بانکی پاسخی ارسال نکرد؛ لطفاً دقایقی دیگر امتحان کنید")
 
 
 async def launch_browser(playwright) -> Browser:
