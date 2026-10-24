@@ -92,10 +92,15 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(menu, {"صبحانه": [], "ناهار": ["جوجه کباب", "خوراک مرغ"], "شام": ["عدس پلو"]})
         self.assertEqual(fake_site.PURCHASES, [])
 
-    async def test_check_basket(self):
+    async def test_check_basket_is_quick(self):
+        # Real throttle settings: an on-demand test must not wait the polling interval.
+        self.throttle = Throttle()
         c = self.client()
+        c.interactive = True
+        started = time.monotonic()
         await c.check_basket()
         await c.close()
+        self.assertLess(time.monotonic() - started, 20)
 
     async def test_wrong_password_stops(self):
         c = self.client(password="bad")
@@ -131,6 +136,15 @@ class UnitTest(unittest.TestCase):
                 await t.wait()
 
         asyncio.run(run())
+
+    def test_background_endpoints_run_on_event_loop(self):
+        # Sync endpoints run in a thread pool, where starting the background task fails.
+        import inspect
+
+        from app import web
+
+        self.assertTrue(inspect.iscoroutinefunction(web.test_account))
+        self.assertTrue(inspect.iscoroutinefunction(web.fetch_menu))
 
     def test_floor(self):
         self.assertGreaterEqual(Throttle(min_interval=0.1).min_interval, config.MIN_POLL_FLOOR)

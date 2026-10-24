@@ -212,6 +212,10 @@ details.manual[open] summary { margin-bottom: 10px; }
 .logs li:first-child { border-top: 0; }
 .logs li::before { content: ""; flex: none; width: 8px; height: 8px; margin-top: 9px; border-radius: 50%; background: var(--line); }
 .logs time { flex: none; color: var(--muted); font-size: 12px; padding-top: 2px; direction: ltr; }
+.logs .msg {
+  min-width: 0; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
 .logs .error { color: var(--err); } .logs .error::before { background: var(--err); }
 .logs .success { color: var(--ok); } .logs .success::before { background: var(--ok); }
 .logs .warn { color: var(--warn); } .logs .warn::before { background: var(--warn); }

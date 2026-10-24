@@ -58,10 +58,16 @@
 <div class="grid2">
   <section class="card">
     <div class="card-head"><span class="step">۱</span><h2>اطلاعات ورود سامانهٔ سلف</h2></div>
-    {% if account %}<div class="saved">ذخیره شده برای&nbsp;<b>{{ account.site_username }}</b>. برای تغییر دوباره وارد کن.</div>{% endif %}
+    {% if account %}<div class="saved">رمز سامانه برای&nbsp;<b>{{ account.site_username }}</b>&nbsp;ذخیره شده است (رمزنگاری‌شده).</div>{% endif %}
     <form method="post" action="/account">
       <label>شماره دانشجویی <input name="site_username" required inputmode="numeric" value="{{ account.site_username if account else '' }}"></label>
-      <label>رمز سامانه <input name="site_password" type="password" required autocomplete="off"></label>
+      <label>رمز سامانه
+        {% if account %}
+        <input name="site_password" type="password" autocomplete="new-password" placeholder="•••••••• ذخیره شده — فقط برای تغییر بنویس">
+        {% else %}
+        <input name="site_password" type="password" required autocomplete="new-password">
+        {% endif %}
+      </label>
       <div class="btns">
         <button>ذخیره</button>
         <button class="secondary" formaction="/account/test" formnovalidate {% if op and op.state == 'running' %}disabled{% endif %}>
@@ -158,7 +164,7 @@
   </div>
   {% if not logs %}<div class="empty">هنوز گزارشی نیست.</div>{% endif %}
   <ul class="logs">
-    {% for l in logs %}<li class="{{ l.level }}"><time>{{ l.created_at|ts }}</time><span>{{ l.message }}</span></li>{% endfor %}
+    {% for l in logs %}<li class="{{ l.level }}"><time>{{ l.created_at|ts }}</time><span class="msg" title="{{ l.message }}">{{ l.message }}</span></li>{% endfor %}
   </ul>
 </section>
 {% endblock %}

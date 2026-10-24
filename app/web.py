@@ -133,17 +133,24 @@ def dashboard(request: Request):
     )
 
 
-def _save_account(uid: int, site_username: str, site_password: str) -> None:
+def _save_account(uid: int, site_username: str, site_password: str) -> bool:
+    """Store the site login. An empty password keeps the saved one. False if there is none to keep."""
     with db.tx() as c:
-        c.execute(
-            "INSERT INTO accounts (user_id, site_username, site_password_enc) VALUES (?, ?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET site_username = excluded.site_username, "
-            "site_password_enc = excluded.site_password_enc",
-            (uid, norm(site_username), security.encrypt(site_password)),
-        )
+        if site_password:
+            c.execute(
+                "INSERT INTO accounts (user_id, site_username, site_password_enc) VALUES (?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET site_username = excluded.site_username, "
+                "site_password_enc = excluded.site_password_enc",
+                (uid, norm(site_username), security.encrypt(site_password)),
+            )
+        elif not c.execute(
+            "UPDATE accounts SET site_username = ? WHERE user_id = ?", (norm(site_username), uid)
+        ).rowcount:
+            return False
     task = worker.tasks.pop(uid, None)  # restart with the new credentials
     if task:
         task.cancel()
+    return True
 
 
 def _has_account(uid: int) -> bool:
@@ -152,21 +159,25 @@ def _has_account(uid: int) -> bool:
 
 
 @app.post("/account")
-def save_account(request: Request, site_username: str = Form(...), site_password: str = Form(...)):
+def save_account(request: Request, site_username: str = Form(...), site_password: str = Form("")):
     uid = _uid(request)
     if not uid:
         return _back("/login")
-    _save_account(uid, site_username, site_password)
-    return _back("/", "اطلاعات ورود ذخیره شد (رمزنگاری‌شده).", request)
+    if not site_username.strip() or not _save_account(uid, site_username, site_password):
+        return _back("/", "شماره دانشجویی و رمز سامانه را وارد کن.", request)
+    if site_password:
+        return _back("/", "شماره دانشجویی و رمز ذخیره شد (رمزنگاری‌شده).", request)
+    return _back("/", "شماره دانشجویی ذخیره شد؛ رمز قبلی سر جایش ماند.", request)
 
 
+# The two endpoints below start asyncio tasks, so they must run on the event loop (async def).
 @app.post("/account/test")
-def test_account(request: Request, site_username: str = Form(""), site_password: str = Form("")):
+async def test_account(request: Request, site_username: str = Form(""), site_password: str = Form("")):
     uid = _uid(request)
     if not uid:
         return _back("/login")
-    # Typed a new password and pressed "test": save it first so the test uses it.
-    if site_username.strip() and site_password:
+    # Typed new details and pressed "test": save them first so the test uses them.
+    if site_username.strip():
         _save_account(uid, site_username, site_password)
     if not _has_account(uid):
         return _back("/", "اول شماره دانشجویی و رمز سامانه را وارد کن.", request)
@@ -177,7 +188,7 @@ def test_account(request: Request, site_username: str = Form(""), site_password:
 
 
 @app.post("/menu")
-def fetch_menu(request: Request, date: str = Form(...)):
+async def fetch_menu(request: Request, date: str = Form(...)):
     uid = _uid(request)
     if not uid:
         return _back("/login")

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 from urllib.parse import urljoin
 
-from playwright.async_api import Browser, BrowserContext, Page
+from playwright.async_api import Browser, BrowserContext, Page, Route
 
 from . import config
 from .ratelimit import Throttle
@@ -145,14 +145,29 @@ class CullinanClient:
         self.context: BrowserContext | None = None
         self.page: Page | None = None
         self.dialogs: list[str] = []
+        # On-demand runs (login test, menu fetch) a user is waiting for: space
+        # requests by STEP_SECONDS only, instead of the full polling interval.
+        self.interactive = False
 
     async def _page(self) -> Page:
         if self.page is None or self.page.is_closed():
             self.context = await self.browser.new_context(locale="fa-IR", viewport={"width": 1366, "height": 900})
+            await self.context.route("**/*", self._route)
             self.page = await self.context.new_page()
-            self.page.set_default_timeout(30_000)
+            self.page.set_default_timeout(15_000)
+            self.page.set_default_navigation_timeout(30_000)
             self.page.on("dialog", self._on_dialog)
         return self.page
+
+    @staticmethod
+    async def _route(route: Route) -> None:
+        # Images/fonts (e.g. the news box embeds dozens from other sites) only slow
+        # every page load and the "network idle" wait; the captcha is the exception.
+        req = route.request
+        if req.resource_type in ("image", "media", "font") and "captcha" not in req.url.lower():
+            await route.abort()
+        else:
+            await route.continue_()
 
     async def _on_dialog(self, dialog) -> None:
         self.dialogs.append(dialog.message)
@@ -214,13 +229,20 @@ class CullinanClient:
 
     async def _goto(self, url: str, step: bool = False) -> Page:
         page = await self._page()
-        await self.throttle.wait(step=step)
+        await self.throttle.wait(step=step or self.interactive)
         await page.goto(url, wait_until="domcontentloaded")
         await self._settle(page)
         return page
 
     async def _on_login_page(self, page: Page) -> bool:
         return await page.locator(SEL["username"]).count() > 0
+
+    @staticmethod
+    async def _fill(page: Page, selector: str, value: str) -> None:
+        # The login inputs are readonly until focused (an anti-autofill trick).
+        field = page.locator(selector).first
+        await field.evaluate("el => el.removeAttribute('readonly')")
+        await field.fill(value)
 
     # ---------------------------------------------------------------- login
     async def login(self) -> None:
@@ -229,8 +251,8 @@ class CullinanClient:
         if not await self._on_login_page(page):
             return
         for attempt in range(1, config.CAPTCHA_OCR_TRIES + 2):
-            await page.locator(SEL["username"]).first.fill(self.username)
-            await page.locator(SEL["password"]).first.fill(self.password)
+            await self._fill(page, SEL["username"], self.username)
+            await self._fill(page, SEL["password"], self.password)
             png = await page.locator(SEL["captcha_img"]).first.screenshot()
             code = await self.solve_captcha(png, attempt)
             if not code:
@@ -238,7 +260,7 @@ class CullinanClient:
                     break
                 page = await self._goto(config.SITE_URL, step=True)  # fresh captcha
                 continue
-            await page.locator(SEL["captcha_input"]).first.fill(code)
+            await self._fill(page, SEL["captcha_input"], code)
             await self.throttle.wait(step=True)
             await self._postback(page, page.locator(SEL["login_button"]).first.click)
             if not await self._on_login_page(page):

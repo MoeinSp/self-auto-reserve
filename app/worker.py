@@ -6,6 +6,8 @@ import logging
 import time
 from typing import Awaitable, Callable
 
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
 
 from . import captcha, db, jalali, security
@@ -42,17 +44,19 @@ OP_TIMEOUT = 600  # covers a manual captcha wait (CAPTCHA_MANUAL_TIMEOUT)
 def _explain(exc: Exception) -> str:
     """Turn an error from the site into advice the user can act on."""
     if isinstance(exc, LoginFailed):
-        return f"شماره دانشجویی یا رمز سامانه اشتباه است ({exc}). اطلاعات را اصلاح و دوباره ذخیره کن."
+        return f"شماره دانشجویی یا رمز سامانه اشتباه است ({str(exc)[:120]}). اطلاعات را اصلاح و دوباره ذخیره کن."
     if isinstance(exc, RateLimited):
         return f"سقف تلاش ساعتی برای محافظت از حساب پر شده؛ حدود {int(exc.retry_after // 60) + 1} دقیقه دیگر دوباره امتحان کن."
     if isinstance(exc, asyncio.TimeoutError):
         return "زمان تمام شد (کپچا وارد نشد یا سایت جواب نداد)."
     if isinstance(exc, SiteError):
         return str(exc)
-    text = str(exc)
-    if "net::" in text or "Timeout" in text:
-        return "سایت دانشگاه در دسترس نیست یا خیلی کند جواب می‌دهد؛ کمی بعد دوباره امتحان کن."
-    return f"خطای غیرمنتظره: {text[:200]}"
+    if isinstance(exc, PlaywrightTimeout):
+        return "سایت دانشگاه دیر جواب داد یا صفحه‌اش با انتظار ربات فرق داشت؛ کمی بعد دوباره امتحان کن."
+    if isinstance(exc, PlaywrightError) and "net::" in str(exc):
+        return "سایت دانشگاه در دسترس نیست؛ کمی بعد دوباره امتحان کن."
+    # Details go to the server log (log.exception at the call site), not the panel.
+    return "خطای غیرمنتظره رخ داد؛ اگر تکرار شد به مدیر پنل خبر بده."
 
 
 class Worker:
@@ -132,6 +136,7 @@ class Worker:
 
         async def go():
             client = self.client_for(user_id)
+            client.interactive = True
             try:
                 op["message"] = await asyncio.wait_for(run(client), OP_TIMEOUT)
                 op["state"] = "ok"
@@ -145,7 +150,11 @@ class Worker:
                 op["finished"] = time.time()
                 await client.close()
 
-        asyncio.create_task(go())
+        try:
+            asyncio.get_running_loop().create_task(go())
+        except RuntimeError:  # not called from the event loop: don't leave a stuck "running" op
+            del self.ops[user_id]
+            raise
         return True
 
     def test_login(self, user_id: int) -> bool:
@@ -196,7 +205,7 @@ class Worker:
                         backoff = 30
                         self._handle(user_id, row, result)
                     except LoginFailed as exc:
-                        msg = f"ورود ناموفق: {exc}. رمز رو در پنل اصلاح کن."
+                        msg = _explain(exc)
                         for j in jobs:
                             db.set_job_status(j["id"], "failed", msg)
                         db.log(user_id, msg, "error")
@@ -206,8 +215,9 @@ class Worker:
                         await asyncio.sleep(exc.retry_after)
                     except Exception as exc:
                         log.exception("job %s failed", row["id"])
-                        db.log(user_id, f"خطا در کار #{row['id']}: {exc}", "error", row["id"])
-                        db.set_job_message(row["id"], f"خطا، {backoff} ثانیه دیگر دوباره: {exc}")
+                        reason = _explain(exc)
+                        db.log(user_id, f"خطا در کار #{row['id']}: {reason}", "error", row["id"])
+                        db.set_job_message(row["id"], f"{reason} ({backoff} ثانیه دیگر دوباره امتحان می‌کنم)")
                         await client.close()
                         await asyncio.sleep(backoff)
                         backoff = min(backoff * 2, MAX_BACKOFF)

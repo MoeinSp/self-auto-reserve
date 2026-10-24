@@ -31,9 +31,13 @@ def login_page(request: Request, error: str = ""):
     if request.cookies.get("auth") == "ok":
         return HTMLResponse("<html><body>داشبورد</body></html>")
     msg = f'<span id="lblMessage">{error}</span>' if error else ""
+    # Like the real site: inputs are readonly until focused, and the news box
+    # embeds images from another host (which the bot should not wait for).
+    ro = """readonly="" onfocus="this.removeAttribute('readonly');\""""
     return HTMLResponse(f"""<html><body><form method="post" action="/">
-      <input id="txtUsernamePlain" name="u"><input id="txtPasswordPlain" name="p" type="password">
-      <img id="Img1" src="/captcha.png" width="80" height="30"><input id="txtCaptcha" name="c">
+      <input id="txtUsernamePlain" name="u" {ro}><input id="txtPasswordPlain" name="p" type="text" {ro}>
+      <img src="https://news.example.invalid/emoji.png" width="18" height="18">
+      <img id="Img1" src="/captcha.png" width="80" height="30"><input id="txtCaptcha" name="c" maxlength="4">
       <input type="submit" id="btnEncript" value="ورود">{msg}</form></body></html>""")
 
 
