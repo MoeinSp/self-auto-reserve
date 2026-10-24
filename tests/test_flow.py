@@ -46,6 +46,7 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         fake_site.STOCK.clear()
         fake_site.PURCHASES.clear()
+        fake_site.MENU.clear()
         self.pw = await async_playwright().start()
         self.browser = await launch_browser(self.pw)
         # Tiny intervals for tests only (the floors are bypassed on purpose).
@@ -78,26 +79,52 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         c = self.client()
         result = await c.attempt(Job(1, "1405/08/05", "ناهار", ["جوجه کباب"]))
         self.assertEqual(result.status, "no_match")
-        self.assertIn("خوراک مرغ (2)", result.seen)
+        self.assertIn("ناهار: خوراک مرغ", result.seen)
         result = await c.attempt(Job(1, "1405/08/05", "شام", ["*"]))
         self.assertEqual(result.status, "empty")
         await c.close()
         self.assertEqual(fake_site.PURCHASES, [])
 
-    async def test_reads_menu_per_meal(self):
-        fake_site.STOCK["1405/08/05"] = {"ناهار": {"جوجه کباب": 2, "خوراک مرغ": 1}, "شام": {"عدس پلو": 3}}
+    async def test_buys_without_meal_from_any_open_row(self):
+        fake_site.STOCK["1405/08/05"] = {"شام": {"عدس پلو": 1}}
+        c = self.client()
+        result = await c.attempt(Job(1, "1405/08/05", "", ["عدس پلو"]))
+        await c.close()
+        self.assertEqual(result.status, "bought", result.message)
+        self.assertEqual(fake_site.PURCHASES, [("1405/08/05", "شام", "عدس پلو", 1)])
+
+    async def test_reads_menu_and_reservations_from_week_page(self):
+        fake_site.MENU["1405/08/05"] = {
+            "ناهار": {"foods": ["جوجه کباب", "خوراک مرغ"], "reserved": "خوراک مرغ"},
+            "شام": {"foods": ["عدس پلو", "کوکو"], "locked": True},
+        }
         c = self.client()
         menu = await c.read_menu("1405/08/05")
         await c.close()
-        self.assertEqual(menu, {"صبحانه": [], "ناهار": ["جوجه کباب", "خوراک مرغ"], "شام": ["عدس پلو"]})
+        self.assertEqual(menu, {
+            "صبحانه": {"foods": [], "reserved": "", "locked": True},
+            "ناهار": {"foods": ["جوجه کباب", "خوراک مرغ"], "reserved": "خوراک مرغ", "locked": False},
+            # Past days are locked but still list their foods.
+            "شام": {"foods": ["عدس پلو", "کوکو"], "reserved": "", "locked": True},
+        })
         self.assertEqual(fake_site.PURCHASES, [])
 
-    async def test_reads_menu_for_one_meal(self):
-        fake_site.STOCK["1405/08/05"] = {"ناهار": {"جوجه کباب": 2}, "شام": {"عدس پلو": 3, "کوکو": 1}}
+    async def test_reads_next_week_for_one_meal(self):
+        fake_site.MENU["1405/08/12"] = {"شام": {"foods": ["ماکارونی"]}, "ناهار": {"foods": ["کباب"]}}
         c = self.client()
-        menu = await c.read_menu("1405/08/05", "شام")
+        menu = await c.read_menu("1405/08/12", "شام")
         await c.close()
-        self.assertEqual(menu, {"شام": ["عدس پلو", "کوکو"]})
+        self.assertEqual(menu, {"شام": {"foods": ["ماکارونی"], "reserved": "", "locked": False}})
+
+    async def test_job_skips_reserved_meal(self):
+        from app.worker import Worker
+
+        fake_site.MENU["1405/08/05"] = {"ناهار": {"foods": ["جوجه کباب"], "reserved": "جوجه کباب"}}
+        c = self.client()
+        row = {"id": 9, "skip_if_reserved": 1, "meal": "ناهار", "date": "1405/08/05"}
+        self.assertEqual(await Worker()._reserved_food(c, row), "جوجه کباب")
+        self.assertEqual(await Worker()._reserved_food(c, {**row, "skip_if_reserved": 0}), "")
+        await c.close()
 
     async def test_check_basket_is_quick(self):
         # Real throttle settings: an on-demand test must not wait the polling interval.

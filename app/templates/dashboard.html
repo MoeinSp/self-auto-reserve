@@ -95,13 +95,15 @@
       <input type="hidden" name="menu_date" value="{{ menu_date }}">
       <div class="menu-head">غذاهای <b dir="ltr">{{ menu_date }}</b> <span class="muted small">· به‌روز شده {{ menu_at|ts }}</span></div>
       <div class="menu">
-        {% for meal, foods in menu.items() %}{% set mi = loop.index0 %}
+        {% for meal, info in menu.items() %}{% set mi = loop.index0 %}
         <fieldset class="meal">
           <legend>{{ meal or 'غذاها' }}</legend>
-          {% for f in foods %}
+          {% if info.reserved %}<div class="res yes">رزرو داری: {{ info.reserved }}</div>
+          {% elif info.foods %}<div class="res">رزرو نداری{% if info.locked %} · مهلت رزرو گذشته{% endif %}</div>{% endif %}
+          {% for f in info.foods %}
           <label class="pick"><input type="checkbox" name="picks" value="{{ mi }}:{{ loop.index0 }}"><span>{{ f }}</span></label>
           {% else %}
-          <p class="muted small">فعلاً غذایی نیست</p>
+          <p class="muted small">غذایی تعریف نشده</p>
           {% endfor %}
         </fieldset>
         {% endfor %}
@@ -123,6 +125,8 @@
         <label>تعداد <input name="quantity" type="number" min="1" max="5" value="1"></label>
         <label>هر چند ثانیه چک کند <input name="poll_seconds" type="number" min="1" step="0.5" value="{{ poll_seconds|int }}"></label>
       </div>
+      <label class="inline"><input type="checkbox" name="skip_if_reserved" value="1" checked>
+        اگر برای آن وعده رزرو داشتم، از سبد نخر (هر ۱۰ دقیقه از صفحهٔ رزرو چک می‌شود)</label>
       <div class="row">
         <label>فقط از ساعت <input name="active_from" type="time"></label>
         <label>تا ساعت <input name="active_to" type="time"></label>

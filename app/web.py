@@ -214,8 +214,8 @@ def _picked_foods(uid: int, menu_date: str, picks: list[str]) -> dict[str, list[
     for pick in picks:
         try:
             m, f = (int(x) for x in pick.split(":"))
-            meal, foods = meals[m]
-            chosen.setdefault(meal, []).append(foods[f])
+            meal, info = meals[m]
+            chosen.setdefault(meal, []).append(info["foods"][f])
         except (ValueError, IndexError):
             continue
     return chosen
@@ -231,6 +231,7 @@ def create_job(
     active_from: str = Form(""),
     active_to: str = Form(""),
     poll_seconds: float = Form(0),
+    skip_if_reserved: str = Form(""),
     menu_date: str = Form(""),
     picks: list[str] = Form([]),
 ):
@@ -255,9 +256,9 @@ def create_job(
         for job_meal, job_foods in wanted:
             c.execute(
                 "INSERT INTO jobs (user_id, date, meal, foods, quantity, active_from, active_to, poll_seconds, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "skip_if_reserved, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (uid, day, job_meal, job_foods, max(1, min(quantity, 5)), active_from, active_to,
-                 _poll_seconds(poll_seconds), now, now),
+                 _poll_seconds(poll_seconds), 1 if skip_if_reserved else 0, now, now),
             )
     label = "کار جدید اضافه شد" if len(wanted) == 1 else f"{len(wanted)} کار جدید (یکی برای هر وعده) اضافه شد"
     return _back("/", f"{label}؛ ربات شروع به پیگیری سبد می‌کند.", request)

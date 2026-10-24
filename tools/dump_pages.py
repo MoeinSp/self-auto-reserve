@@ -15,7 +15,7 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 
 from app import captcha, config
-from app.cullinan import CullinanClient, _real_options, describe_grid, launch_browser
+from app.cullinan import CullinanClient, describe_rows, launch_browser
 from app.ratelimit import Throttle
 
 OUT = Path("dumps")
@@ -53,23 +53,22 @@ async def main() -> None:
         await save(page, "1_login")
         await client.login()
         await save(client.page, "2_after_login")
-        page = await client.open_basket(args.date)
-        await save(page, "3_basket")
+        report = []
         try:
-            grid = await client.read_grid(page)
+            page = await client.open_basket(args.date)
+            await save(page, "3_basket")
+            report += ["--- basket", describe_rows(await client.basket_rows(page))]
         except Exception as exc:
-            print("could not read grid:", exc)
-            await browser.close()
-            return
-        report = [describe_grid(grid)]
-        # Pick each meal-like option of the first row once, to see how the food list fills.
-        slot = client._slot(grid, 0)
-        for flt in slot["filters"]:
-            for i, opt in enumerate(_real_options(flt)[:4]):
-                await client._select(page, flt, opt["value"])
-                await save(page, f"4_filter_{flt['id']}_{i}")
-                report.append(f"\n--- after choosing {opt['text']!r} in #{flt['id']}\n")
-                report.append(describe_grid(await client.read_grid(page)))
+            report.append(f"could not read basket: {exc}")
+        try:
+            week = await client.read_week(args.date)
+            await save(client.page, "4_reservation")
+            report.append("--- reservation week")
+            for day, meals in sorted(week.items()):
+                for meal, info in meals.items():
+                    report.append(f"{day} {meal}: {info}")
+        except Exception as exc:
+            report.append(f"could not read reservation page: {exc}")
         report.append("\ndialogs: " + repr(client.dialogs))
         (OUT / "report.txt").write_text("\n".join(report), encoding="utf-8")
         print("\n".join(report))

@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     poll_seconds REAL NOT NULL DEFAULT 0,  -- seconds between checks (0 = POLL_SECONDS)
     attempts INTEGER NOT NULL DEFAULT 0,   -- basket checks done so far
     last_check REAL NOT NULL DEFAULT 0,
+    skip_if_reserved INTEGER NOT NULL DEFAULT 1, -- don't buy if the meal is already reserved
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -47,11 +48,11 @@ CREATE TABLE IF NOT EXISTS logs (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS logs_user ON logs(user_id, id);
--- Foods offered in the basket for a date, read on demand so users can tick them.
+-- Menu of a date from the weekly reservation page, read on demand so users can tick foods.
 CREATE TABLE IF NOT EXISTS menus (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     date TEXT NOT NULL,
-    data TEXT NOT NULL,            -- JSON: {meal: [food, ...]}
+    data TEXT NOT NULL,            -- JSON: {meal: {"foods": [...], "reserved": food or "", "locked": bool}}
     fetched_at REAL NOT NULL,
     PRIMARY KEY (user_id, date)
 );
@@ -80,6 +81,7 @@ MIGRATIONS = [
     ("jobs", "poll_seconds", "REAL NOT NULL DEFAULT 0"),
     ("jobs", "attempts", "INTEGER NOT NULL DEFAULT 0"),
     ("jobs", "last_check", "REAL NOT NULL DEFAULT 0"),
+    ("jobs", "skip_if_reserved", "INTEGER NOT NULL DEFAULT 1"),
 ]
 
 

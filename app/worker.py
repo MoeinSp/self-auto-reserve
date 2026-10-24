@@ -38,6 +38,7 @@ def _active_jobs(user_id: int) -> list:
 
 
 OP_TIMEOUT = 600  # covers a manual captcha wait (CAPTCHA_MANUAL_TIMEOUT)
+RESERVATION_RECHECK = 600  # seconds between "is this meal already reserved?" checks per job
 
 
 def _explain(exc: Exception) -> str:
@@ -64,6 +65,7 @@ class Worker:
         self.throttles: dict[int, Throttle] = {}
         # One on-demand operation (login test / menu fetch) per user, shown on the dashboard.
         self.ops: dict[int, dict] = {}
+        self.reservation_checked: dict[int, float] = {}  # job id -> monotonic time of last check
         self._pw = None
         self.browser = None
 
@@ -180,10 +182,11 @@ class Worker:
                     (user_id, date, json.dumps(menu, ensure_ascii=False), time.time()),
                 )
             what = f"{meal} {date}" if meal else date
-            total = sum(len(foods) for foods in found.values())
-            if not total:
-                return f"برای {what} فعلاً غذایی در سبد نیست."
-            return f"غذاهای {what} پیدا شد ({total} غذا)؛ تیک بزن و «شروع پیگیری» را بزن."
+            if not any(info["foods"] for info in found.values()):
+                return f"برای {what} در برنامهٔ غذایی غذایی تعریف نشده."
+            reserved = [f"{m}: {info['reserved']}" for m, info in found.items() if info["reserved"]]
+            note = f" رزرو فعلی تو — {'، '.join(reserved)}." if reserved else " برای این وعده‌ها رزروی نداری."
+            return f"غذاهای {what} پیدا شد؛ تیک بزن و «شروع پیگیری» را بزن.{note}"
 
         return self.start_op(user_id, "دریافت لیست غذا", run)
 
@@ -208,6 +211,12 @@ class Worker:
                     job = Job(row["id"], row["date"], row["meal"], parse_foods(row["foods"]), row["quantity"])
                     client.poll_interval = row["poll_seconds"] or None
                     try:
+                        reserved = await self._reserved_food(client, row)
+                        if reserved:
+                            msg = f"برای {row['meal']} {row['date']} رزرو داری ({reserved})؛ از سبد نخریدم."
+                            db.set_job_status(row["id"], "stopped", msg)
+                            db.log(user_id, f"کار #{row['id']}: {msg}", "warn", row["id"])
+                            continue
                         result = await client.attempt(job)
                         backoff = 30
                         self._handle(user_id, row, result)
@@ -232,6 +241,17 @@ class Worker:
                     await asyncio.sleep(IDLE_SECONDS)
         finally:
             await client.close()
+
+    async def _reserved_food(self, client: CullinanClient, row) -> str:
+        """The food already reserved for the job's meal ("" if none), checked now and then."""
+        if not row["skip_if_reserved"] or not row["meal"]:
+            return ""
+        last = self.reservation_checked.get(row["id"])
+        if last is not None and time.monotonic() - last < RESERVATION_RECHECK:
+            return ""
+        menu = await client.read_menu(row["date"], row["meal"])
+        self.reservation_checked[row["id"]] = time.monotonic()
+        return next((info["reserved"] for info in menu.values() if info["reserved"]), "")
 
     @staticmethod
     def _handle(user_id: int, row, result: Attempt) -> None:

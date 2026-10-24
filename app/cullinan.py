@@ -28,13 +28,22 @@ SEL = {
     "captcha_img": "#Img1, img[id*='captcha' i], img[src*='captcha' i]",
     "login_button": "#btnEncript, input[type=submit][id*='login' i], button[id*='login' i]",
     "login_error": "[id*='lblMessage' i], [id*='lblError' i], .alert, .error, .validation-summary-errors",
-    "save_button": "input[type=submit][value*='ذخیره'], button:has-text('ذخیره'), a:has-text('ذخیره')",
-    "page_message": "[id*='lblMessage' i], [id*='lblMsg' i], [id*='lblError' i], .alert, .toast-message",
+    # Food basket page (FoodBasket/FoodBasketBuy.aspx): one row per meal.
+    "basket_grid": "[id$='grdFoodBasketReservation']",
+    "basket_date": "[id$='txtDate']",
+    "basket_go": "[id$='imgbtnGoToDate']",
+    "basket_save": "[id$='btnSave'], input[type=submit][value*='ذخیره']",
+    "page_message": "[id$='messageBoxValue'], [id$='alertBoxValue'], .toast-message, [id*='lblMessage' i]",
+    # Weekly reservation page (Reservation/Reservation.aspx): one grid per meal, one row per day.
+    "week_label": "[id$='lblWeekDate']",
+    "week_next": "[id$='imgbtnNextWeek']",
+    "week_prev": "[id$='imgbtnLastWeek']",
 }
+RESERVATION_PATH = "Reservation/Reservation.aspx"
+WEEK_GRIDS = {"صبحانه": "Breakfast", "ناهار": "Lunch", "شام": "Dinner"}
 
 # Dropdown entries that mean "nothing selected".
 PLACEHOLDERS = {"", "-", "--", "0", "انتخاب", "انتخاب کنید", "---"}
-MEAL_NAMES = ("صبحانه", "ناهار", "شام", "سحری", "افطار")
 LONG_REQUEST = 2.5  # seconds; see _postback
 WRONG_PASSWORD_HINTS = ("رمز", "کلمه عبور", "نام کاربری")
 ERROR_HINTS = ("خطا", "ناموفق", "کافی نیست", "موجود نیست", "امکان", "مجاز نیست", "error")
@@ -67,31 +76,31 @@ class Attempt:
     seen: list[str] = field(default_factory=list)
 
 
-# Collects the basket grid into plain data. The grid is found by its header
-# row containing "غذا"; each data row with a checkbox is a purchase slot.
-READ_GRID_JS = r"""
-() => {
+# Reads the rows of a reservation grid into plain data. Both pages use the same
+# row layout, with control ids generated from fixed names: chkReserve (the
+# "reserve" box), drpSelf, drpFood, drpFoodCount, lblFoodType (meal, basket
+# page) and imgStaus (status icon). Returns null if the table is missing.
+READ_ROWS_JS = r"""
+(tableSel) => {
   const txt = el => (el ? el.innerText || el.textContent || '' : '').trim();
-  const tables = [...document.querySelectorAll('table')].filter(t =>
-    [...t.querySelectorAll('th, tr:first-child td')].some(h => txt(h).includes('غذا')));
-  if (!tables.length) return null;
-  const table = tables[tables.length - 1];
-  const headRow = table.querySelector('tr');
-  const headers = [...headRow.children].map(txt);
-  const rows = [];
-  for (const tr of [...table.querySelectorAll('tr')].slice(1)) {
-    const cells = [...tr.children].map((td, i) => ({
-      header: headers[i] || '',
-      text: txt(td),
-      selects: [...td.querySelectorAll('select')].map(s => ({
-        id: s.id, name: s.name, disabled: s.disabled,
-        options: [...s.options].map(o => ({value: o.value, text: txt(o), selected: o.selected})),
-      })),
-      checkboxes: [...td.querySelectorAll('input[type=checkbox]')].map(c => ({id: c.id, name: c.name, checked: c.checked, disabled: c.disabled})),
-    }));
-    if (cells.some(c => c.selects.length || c.checkboxes.length)) rows.push(cells);
-  }
-  return {headers, rows};
+  const table = document.querySelector(tableSel);
+  if (!table) return null;
+  const sel = (tr, name) => {
+    const s = tr.querySelector(`select[id*="${name}_"]`);
+    return s && {id: s.id, name: s.name, disabled: s.disabled,
+                 options: [...s.options].map(o => ({value: o.value, text: txt(o), selected: o.selected}))};
+  };
+  return [...table.querySelectorAll('tr')].filter(tr => tr.querySelector('input[id*="chkReserve"]')).map(tr => {
+    const c = tr.querySelector('input[id*="chkReserve"]');
+    const meal = tr.querySelector('span[id*="lblFoodType"]');
+    const status = tr.querySelector('img[id*="imgStaus"], img[id*="imgStatus"]');
+    return {
+      label: meal ? txt(meal) : txt(tr.children[1]),
+      check: {id: c.id, name: c.name, checked: c.checked, disabled: c.disabled},
+      self: sel(tr, 'drpSelf'), food: sel(tr, 'drpFood'), count: sel(tr, 'drpFoodCount'),
+      status: status ? status.title || '' : '',
+    };
+  });
 }
 """
 
@@ -107,29 +116,32 @@ STATE_JS = r"""
 }
 """
 
-FIND_DATE_INPUT_JS = r"""
-() => {
-  const re = /^[0-9۰-۹]{4}\/[0-9۰-۹]{1,2}\/[0-9۰-۹]{1,2}$/;
-  const inputs = [...document.querySelectorAll('input[type=text], input:not([type])')];
-  const el = inputs.find(i => re.test((i.value || '').trim())) ||
-             inputs.find(i => /date|tarikh/i.test(i.id + ' ' + i.name));
-  return el ? (el.id ? '#' + CSS.escape(el.id) : `[name="${el.name}"]`) : null;
-}
-"""
+DATE_RE = re.compile(r"\d{4}/\d{2}/\d{2}")
 
 
 def _css(item: dict) -> str:
     return f"#{item['id']}" if item.get("id") else f"[name=\"{item['name']}\"]"
 
 
-def _real_options(select: dict) -> list[dict]:
-    return [o for o in select["options"] if norm(o["text"]) not in PLACEHOLDERS]
+def _real_options(select: dict | None) -> list[dict]:
+    if not select:
+        return []
+    return [o for o in select["options"] if norm(o["text"]) not in PLACEHOLDERS and o["value"] != "-1"]
 
 
-def _food_names(select: dict) -> list[str]:
-    """Option texts without a trailing stock/price note like "(3)"."""
-    names = [re.sub(r"\s*\(\s*[\d,٬]+\s*\)\s*$", "", o["text"]).strip() for o in _real_options(select)]
-    return list(dict.fromkeys(n for n in names if n))
+def food_name(text: str) -> str:
+    """Option text without a trailing price or stock note ("... 250000 ریال", "(3)")."""
+    text = re.sub(r"\s*\(\s*[\d,٬]+\s*\)\s*$", "", norm(text))
+    return re.sub(r"\s*[\d,٬]+\s*(ریال|تومان)\s*$", "", text).strip()
+
+
+def _food_names(select: dict | None) -> list[str]:
+    return list(dict.fromkeys(n for n in (food_name(o["text"]) for o in _real_options(select)) if n))
+
+
+def _usable(row: dict) -> bool:
+    """A grid row whose food can still be chosen (not locked / past)."""
+    return not row["check"]["disabled"] and bool(row["food"]) and not row["food"]["disabled"]
 
 
 class CullinanClient:
@@ -316,168 +328,110 @@ class CullinanClient:
                 texts.append((await loc.nth(i).inner_text()).strip())
         return " ".join(t for t in texts if t)
 
-    # --------------------------------------------------------------- basket
-    async def open_basket(self, date: str) -> Page:
-        url = urljoin(config.SITE_URL, config.BASKET_PATH)
+    async def _open(self, path: str) -> Page:
+        """Open a page of the site, logging in first if the session is gone."""
+        url = urljoin(config.SITE_URL, path)
         page = await self._goto(url)
         if await self._on_login_page(page) or "login" in page.url.lower():
             await self.login()
             page = await self._goto(url, step=True)
             if await self._on_login_page(page):
-                raise SiteError("بعد از ورود هم صفحهٔ سبد باز نشد")
+                raise SiteError("بعد از ورود هم صفحه باز نشد")
+        return page
+
+    async def _rows(self, page: Page, table: str) -> list[dict] | None:
+        return await page.evaluate(READ_ROWS_JS, table)
+
+    # --------------------------------------------------------------- basket
+    async def open_basket(self, date: str) -> Page:
+        page = await self._open(config.BASKET_PATH)
         await self._set_date(page, date)
         return page
 
     async def _set_date(self, page: Page, date: str) -> None:
-        selector = await page.evaluate(FIND_DATE_INPUT_JS)
-        if not selector:
+        field = page.locator(SEL["basket_date"]).first
+        if await field.count() == 0:
             raise SiteError("فیلد تاریخ در صفحهٔ سبد پیدا نشد")
-        current = norm(await page.locator(selector).input_value())
-        if current == date:
+        if norm(await field.input_value()) == date:
             return
         await self.throttle.wait(step=True)
-        # Set the value like the date picker does, then fire change/blur so a
-        # WebForms AutoPostBack (if any) runs.
-        await self._postback(page, lambda: page.locator(selector).evaluate(
-            """(el, v) => { el.value = v;
-                 el.dispatchEvent(new Event('input', {bubbles: true}));
-                 el.dispatchEvent(new Event('change', {bubbles: true}));
-                 if (document.contains(el)) el.dispatchEvent(new Event('blur', {bubbles: true})); }""",
-            date,
-        ))
+        go = page.locator(SEL["basket_go"]).first
+        if await go.count():
+            # The date box has no postback of its own: set it, then press the arrow next to it.
+            await field.evaluate("(el, v) => { el.value = v; }", date)
+            await self._postback(page, go.click)
+        else:
+            await self._postback(page, lambda: field.evaluate(
+                """(el, v) => { el.value = v; el.dispatchEvent(new Event('change', {bubbles: true})); }""", date))
+        if norm(await page.locator(SEL["basket_date"]).first.input_value()) != date:
+            raise SiteError(f"سایت تاریخ سبد را روی {date} نبرد")
 
-    async def read_grid(self, page: Page) -> dict:
-        grid = await page.evaluate(READ_GRID_JS)
-        if not grid or not grid["rows"]:
+    async def basket_rows(self, page: Page) -> list[dict]:
+        rows = await self._rows(page, SEL["basket_grid"])
+        if rows is None:
             raise SiteError("جدول سبد غذایی در صفحه پیدا نشد")
-        return grid
-
-    @staticmethod
-    def _role(header: str) -> str:
-        h = norm(header)
-        if "غذا" in h:
-            return "food"
-        if "تعداد" in h:
-            return "count"
-        if "رزرو" in h:
-            return "check"
-        return "filter"  # e.g. meal / self columns that narrow the food list
-
-    def _slot(self, grid: dict, index: int) -> dict:
-        row = grid["rows"][index]
-        slot = {"food": None, "count": None, "check": None, "filters": []}
-        for cell in row:
-            role = self._role(cell["header"])
-            for sel in cell["selects"]:
-                if role == "food" and slot["food"] is None:
-                    slot["food"] = sel
-                elif role == "count" and slot["count"] is None:
-                    slot["count"] = sel
-                else:
-                    slot["filters"].append(sel)
-            for box in cell["checkboxes"]:
-                slot["check"] = slot["check"] or box
-        if slot["food"] is None:
-            raise SiteError("ستون «غذا» در جدول سبد پیدا نشد")
-        return slot
-
-    def _free_slot_index(self, grid: dict) -> int:
-        for i in range(len(grid["rows"])):
-            slot = self._slot(grid, i)
-            selected = [o for o in slot["food"]["options"] if o["selected"]]
-            chosen = selected and norm(selected[0]["text"]) not in PLACEHOLDERS
-            if not chosen and not (slot["check"] and slot["check"]["checked"]):
-                return i
-        return 0
+        return rows
 
     async def _select(self, page: Page, select: dict, value: str) -> None:
         await self.throttle.wait(step=True)
         await self._postback(page, lambda: page.select_option(_css(select), value=value))
 
     async def check_basket(self) -> None:
-        """Log in and make sure the basket page opens (used by the login test)."""
-        url = urljoin(config.SITE_URL, config.BASKET_PATH)
+        """Log in and make sure the basket page opens."""
         await self.login()
         started = time.monotonic()
-        page = await self._goto(url, step=True)
+        page = await self._goto(urljoin(config.SITE_URL, config.BASKET_PATH), step=True)
         log.info("basket page loaded in %.1fs", time.monotonic() - started)
         if await self._on_login_page(page):
             raise SiteError("ورود انجام شد ولی صفحهٔ سبد غذایی باز نشد")
-
-    async def read_menu(self, date: str, meal: str = "") -> dict[str, list[str]]:
-        """Foods offered on `date`, per meal (only `meal` if given). Read-only: nothing is ticked or saved."""
-        self.dialogs.clear()
-        page = await self.open_basket(date)
-        grid = await self.read_grid(page)
-        index = self._free_slot_index(grid)
-        slot = self._slot(grid, index)
-        meal_filter = next(
-            (f for f in slot["filters"] if any(matches(o["text"], m) for o in f["options"] for m in MEAL_NAMES)),
-            None,
-        )
-        if meal_filter is None:
-            return {"": _food_names(slot["food"])}
-        menu = {}
-        for opt in _real_options(meal_filter):
-            if meal and not matches(opt["text"], meal):
-                continue
-            if not opt["selected"]:
-                await self._select(page, meal_filter, opt["value"])
-            slot = self._slot(await self.read_grid(page), index)
-            menu[norm(opt["text"])] = _food_names(slot["food"])
-        return menu
 
     async def attempt(self, job: Job) -> Attempt:
         """One polling round: look at the basket and buy if a wanted food is there."""
         self.dialogs.clear()
         page = await self.open_basket(job.date)
-        grid = await self.read_grid(page)
-        index = self._free_slot_index(grid)
-        slot = self._slot(grid, index)
-
-        # 1) Narrow down by meal (and similar filter dropdowns), if requested.
-        if job.meal:
-            for flt in slot["filters"]:
-                hit = next((o for o in flt["options"] if matches(o["text"], job.meal)), None)
-                if hit and not hit["selected"]:
-                    await self._select(page, flt, hit["value"])
-                    grid = await self.read_grid(page)
-                    slot = self._slot(grid, index)
-
-        # 2) Pick the best food by the user's priority list.
-        offered = _real_options(slot["food"])
-        seen = [o["text"] for o in offered]
-        if not offered:
+        rows = await self.basket_rows(page)
+        # One row per meal; rows of meals with nothing in the basket are locked.
+        mine = [i for i, r in enumerate(rows) if not job.meal or matches(r["label"], job.meal)]
+        open_rows = [i for i in mine if _usable(rows[i]) and _real_options(rows[i]["food"])]
+        seen = [f"{rows[i]['label']}: {food_name(o['text'])}" for i in open_rows for o in _real_options(rows[i]["food"])]
+        if not open_rows:
             return Attempt("empty", "فعلاً غذایی در سبد نیست", seen)
+
+        # 1) Best food by the user's priority list (across meals if no meal was given).
         choice = None
         for wanted in job.foods:
-            choice = next((o for o in offered if wanted == "*" or matches(o["text"], wanted)), None)
+            for i in open_rows:
+                hit = next((o for o in _real_options(rows[i]["food"]) if wanted == "*" or matches(o["text"], wanted)), None)
+                if hit:
+                    choice = (i, hit)
+                    break
             if choice:
                 break
         if choice is None:
             return Attempt("no_match", "غذای دلخواه در سبد نیست", seen)
+        index, food = choice
+        name = food_name(food["text"])
 
-        if not choice["selected"]:
-            await self._select(page, slot["food"], choice["value"])
-            grid = await self.read_grid(page)
-            slot = self._slot(grid, index)
+        if not food["selected"]:
+            await self._select(page, rows[index]["food"], food["value"])
+            rows = await self.basket_rows(page)
 
-        # 3) Quantity.
-        if slot["count"]:
-            counts = _real_options(slot["count"])
+        # 2) Quantity.
+        counts = _real_options(rows[index]["count"])
+        if counts:
             want = str(job.quantity)
-            opt = next((o for o in counts if norm(o["text"]) == want or o["value"] == want), None)
-            opt = opt or (counts[0] if counts else None)
-            if opt and not opt["selected"]:
-                await self._select(page, slot["count"], opt["value"])
-                grid = await self.read_grid(page)
-                slot = self._slot(grid, index)
+            opt = next((o for o in counts if norm(o["text"]) == want or o["value"] == want), counts[0])
+            if not opt["selected"]:
+                await self._select(page, rows[index]["count"], opt["value"])
+                rows = await self.basket_rows(page)
 
-        # 4) Tick the row and save.
-        if slot["check"] and not slot["check"]["checked"]:
-            await self.throttle.wait(step=True)
-            await self._postback(page, page.locator(_css(slot["check"])).check)
-        save = page.locator(SEL["save_button"]).first
+        # 3) Tick the row and save.
+        check = rows[index]["check"]
+        if check["disabled"]:
+            return Attempt("no_match", f"«{name}» همین الان از سبد برداشته شد", seen)
+        if not check["checked"]:
+            await page.locator(_css(check)).check()
+        save = page.locator(SEL["basket_save"]).first
         if await save.count() == 0:
             raise SiteError("دکمهٔ «ذخیره» پیدا نشد")
         await self.throttle.wait(step=True)
@@ -485,22 +439,62 @@ class CullinanClient:
 
         message = norm(" ".join(self.dialogs) + " " + await self._text(page, SEL["page_message"]))
         if any(h in message.lower() for h in ERROR_HINTS):
-            return Attempt("error", f"خرید «{choice['text']}» ناموفق: {message}", seen)
-        return Attempt("bought", f"«{choice['text']}» خریداری شد. {message}".strip(), seen)
+            return Attempt("error", f"خرید «{name}» ناموفق: {message}", seen)
+        return Attempt("bought", f"«{name}» ({rows[index]['label']}) خریداری شد. {message}".strip(), seen)
+
+    # ---------------------------------------------------- weekly reservation
+    async def read_week(self, date: str) -> dict[str, dict[str, dict]]:
+        """Menu and own reservations of the week containing `date`, from the reservation page.
+
+        Returns {date: {meal: {"foods": [...], "reserved": food or "", "locked": bool}}}.
+        Read-only: the page is only navigated (week arrows), never saved.
+        """
+        page = await self._open(RESERVATION_PATH)
+        for _ in range(4):
+            label = norm(await self._text(page, SEL["week_label"]))
+            days = DATE_RE.findall(label)
+            if len(days) < 2:
+                raise SiteError("بازهٔ هفته در صفحهٔ رزرو پیدا نشد")
+            if days[0] <= date <= days[-1]:
+                break
+            arrow = page.locator(SEL["week_next"] if date > days[-1] else SEL["week_prev"]).first
+            if await arrow.count() == 0:
+                raise SiteError("دکمهٔ هفتهٔ بعد/قبل در صفحهٔ رزرو پیدا نشد")
+            await self.throttle.wait(step=True)
+            await self._postback(page, arrow.click)
+        else:
+            raise SiteError(f"هفتهٔ {date} در صفحهٔ رزرو در دسترس نیست")
+
+        week: dict[str, dict[str, dict]] = {}
+        for meal, suffix in WEEK_GRIDS.items():
+            for row in await self._rows(page, f"[id$='grdReservation{suffix}']") or []:
+                day = DATE_RE.search(norm(row["label"]))
+                if not day:
+                    continue
+                chosen = next((o for o in _real_options(row["food"]) if o["selected"]), None)
+                reserved = row["check"]["checked"] or "رزرو شده" in row["status"]
+                week.setdefault(day.group(0), {})[meal] = {
+                    "foods": _food_names(row["food"]),
+                    "reserved": food_name(chosen["text"]) if reserved and chosen else "",
+                    "locked": row["check"]["disabled"],
+                }
+        return week
+
+    async def read_menu(self, date: str, meal: str = "") -> dict[str, dict]:
+        """Foods and reservation of `date`, per meal (only `meal` if given)."""
+        day = (await self.read_week(date)).get(date, {})
+        return {m: info for m, info in day.items() if not meal or matches(m, meal)}
 
 
 async def launch_browser(playwright) -> Browser:
     return await playwright.chromium.launch(headless=config.HEADLESS, executable_path=config.CHROMIUM_PATH)
 
 
-def describe_grid(grid: dict) -> str:
-    """Human-readable dump of the grid, used by the dump tool and logs."""
-    lines = [" | ".join(grid["headers"])]
-    for r, row in enumerate(grid["rows"]):
-        for cell in row:
-            for sel in cell["selects"]:
-                opts = ", ".join(re.sub(r"\s+", " ", o["text"]) for o in sel["options"][:15])
-                lines.append(f"row {r} [{cell['header']}] #{sel['id']}: {opts}")
-            for box in cell["checkboxes"]:
-                lines.append(f"row {r} [{cell['header']}] checkbox #{box['id']} checked={box['checked']}")
+def describe_rows(rows: list[dict]) -> str:
+    """Human-readable dump of grid rows, used by the dump tool."""
+    lines = []
+    for r in rows:
+        foods = ", ".join(("*" if o["selected"] else "") + o["text"] for o in (r["food"] or {}).get("options", []))
+        lines.append(f"{r['label']} | checked={r['check']['checked']} disabled={r['check']['disabled']} "
+                     f"status={r['status']!r} | {foods}")
     return "\n".join(lines)
