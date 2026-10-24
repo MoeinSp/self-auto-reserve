@@ -607,15 +607,16 @@ class CullinanClient:
 
         return results
 
-    async def get_forgot_receipt(self, date: str, meal: str = "") -> dict:
+    async def get_forgot_receipt(self, date: str, meal: str = "", reserve_type: str = "0") -> dict:
         """Fetch forgot card receipt code from Reservation/ForgotReceipt.aspx.
-        Handles two-step confirmation (cphMain_btnOk -> cphMain_btnAccept).
+        Handles two-step confirmation (cphMain_btnOk -> cphMain_btnAccept) with resilient polling.
         """
         page = await self._open("Reservation/ForgotReceipt.aspx")
 
         # 1) Set date in #cphMain_txtDate
         date_input = page.locator("#cphMain_txtDate, input[name$='txtDate']").first
         if await date_input.count() > 0:
+            await date_input.fill(date)
             await date_input.evaluate("""(el, v) => {
                 el.value = v;
                 el.dispatchEvent(new Event('input', {bubbles: true}));
@@ -625,7 +626,8 @@ class CullinanClient:
         # 2) Set reserve type (0 = هفتگی, 2 = سبد غذایی)
         res_type = page.locator("#cphMain_drpReserveType, select[name$='drpReserveType']").first
         if await res_type.count() > 0:
-            await res_type.select_option(value="0")
+            val = str(reserve_type) if str(reserve_type) in ("0", "1", "2") else "0"
+            await res_type.select_option(value=val)
 
         # 3) Set meal dropdown (1=صبحانه, 2=ناهار, 3=شام)
         meal_sel = page.locator("#cphMain_drpFoodType, select[name$='drpFoodType']").first
@@ -641,15 +643,53 @@ class CullinanClient:
         await self.throttle.wait(step=True)
         await self._postback(page, btn.click)
 
-        # 5) Step 2: Check for confirmation button "موافقم" (#cphMain_btnAccept) as seen in فیش 2.html
-        btn_accept = page.locator("#cphMain_btnAccept, input[name$='btnAccept'], input[value*='موافقم']").first
-        if await btn_accept.count() > 0 and await btn_accept.is_visible():
+        # 5) Step 2: Poll for UpdatePanel result (either btnAccept 'موافقم' or error alert)
+        btn_accept = None
+        for _ in range(30):
+            acc_loc = page.locator("#cphMain_btnAccept, input[name$='btnAccept'], input[value*='موافقم']").first
+            if await acc_loc.count() > 0 and await acc_loc.is_visible():
+                btn_accept = acc_loc
+                break
+
+            alert_loc = page.locator("#cphMain_alertBoxValue").first
+            if await alert_loc.count() > 0:
+                t = norm(await alert_loc.inner_text()).strip()
+                if t:
+                    break
+
+            toast_loc = page.locator(".toast-message").first
+            if await toast_loc.count() > 0:
+                t = norm(await toast_loc.inner_text()).strip()
+                if t:
+                    break
+
+            await asyncio.sleep(0.2)
+
+        # If confirmation button 'موافقم' appeared, click it to issue the receipt!
+        if btn_accept:
             await self.throttle.wait(step=True)
             await self._postback(page, btn_accept.click)
+            for _ in range(30):
+                alert_loc = page.locator("#cphMain_alertBoxValue").first
+                if await alert_loc.count() > 0:
+                    t = norm(await alert_loc.inner_text()).strip()
+                    if t:
+                        break
+                toast_loc = page.locator(".toast-message").first
+                if await toast_loc.count() > 0:
+                    t = norm(await toast_loc.inner_text()).strip()
+                    if t:
+                        break
+                res_loc = page.locator("[id$='lblBarcode'], [id$='lblReceiptCode'], [id$='lblFish'], [id$='lblCode'], #cphMain_lblResult").first
+                if await res_loc.count() > 0:
+                    t = norm(await res_loc.inner_text()).strip()
+                    if any(ch.isdigit() for ch in t):
+                        break
+                await asyncio.sleep(0.2)
 
-        # 6) Read alert and messages
+        # 6) Collect all feedback texts from the site
         alert_text = ""
-        for sel in ("#cphMain_alertBoxValue", ".toast-message", ".alertBox", "#toast-container"):
+        for sel in ("#cphMain_alertBoxValue", ".toast-message", "#toast-container"):
             loc = page.locator(sel).first
             if await loc.count() > 0:
                 txt = norm(await loc.inner_text()).strip()
@@ -660,13 +700,13 @@ class CullinanClient:
         if not alert_text and self.dialogs:
             alert_text = norm(self.dialogs[-1]).strip()
 
-        # Extract code from alert_text or receipt labels
+        # 7) Extract code from alert_text or receipt labels
         code = ""
         patterns = [
             r"(?:کد|شماره)\s*(?:فیش|فراموشی|ژتون|بارکد)\s*[:=\-]?\s*(\d{3,12})",
             r"(\d{4,10})",
         ]
-        has_error = any(h in alert_text for h in ("غیرفعال", "خطا", "یافت نشد", "ندارید", "خارج از بازه", "امکان", "سقف", "ناموفق", "پایان"))
+        has_error = any(h in alert_text for h in ("غیرفعال", "خطا", "یافت نشد", "ندارید", "خارج از بازه", "امکان", "سقف", "ناموفق", "پایان", "مجاز نیست"))
         if alert_text and not has_error:
             for pat in patterns:
                 m = re.search(pat, alert_text)
@@ -674,9 +714,8 @@ class CullinanClient:
                     code = m.group(1)
                     break
 
-        # Also check any specific barcode/receipt labels on page if code not found in alert
         if not code and not has_error:
-            for code_sel in ("[id$='lblBarcode']", "[id$='lblReceiptCode']", "[id$='lblFish']", "[id$='lblCode']", ".receipt-code", "#cphMain_lblResult"):
+            for code_sel in ("[id$='lblBarcode'], [id$='lblReceiptCode'], [id$='lblFish'], [id$='lblCode'], .receipt-code, #cphMain_lblResult"):
                 loc = page.locator(code_sel).first
                 if await loc.count() > 0:
                     c_text = norm(await loc.inner_text()).strip()
@@ -685,13 +724,13 @@ class CullinanClient:
                         code = m.group(1)
                         break
 
-        success = bool(code) or ("با موفقیت" in alert_text and not has_error)
+        success = bool(code) or ("موفق" in alert_text and not has_error)
         msg = alert_text
         if not msg:
             if code:
                 msg = f"کد فیش فراموشی: {code}"
             else:
-                msg = "دریافت فیش فراموشی امکان‌پذیر نشد (احتمالاً خارج از بازه زمانی مجاز یا عدم وجود غذای رزروشده در این وعده)"
+                msg = "پاسخی از سامانه سلف دریافت نشد یا این وعده فاقد فیش است."
 
         return {
             "success": success,
@@ -767,12 +806,19 @@ class CullinanClient:
         await self.throttle.wait(step=True)
         await self._postback(page, btn.click)
 
-        # Step 2: Now on confirmation screen (cphMain_tblResult from خرید 2.html)
-        btn_pay = page.locator("#cphMain_btnPay, input[name$='btnPay'], input[value*='پرداخت']").first
-        if await btn_pay.count() == 0:
-            alert = norm(await self._text(page, "#cphMain_alertBoxValue, #cphMain_messageBoxValue"))
-            if alert:
-                raise SiteError(f"خطای سامانه سلف در ثبت پرداخت: {alert}")
+        # Step 2: Now poll for confirmation screen (#cphMain_btnPay 'پرداخت' or alert)
+        btn_pay = None
+        for _ in range(30):
+            pay_loc = page.locator("#cphMain_btnPay, input[name$='btnPay'], input[value*='پرداخت']").first
+            if await pay_loc.count() > 0 and await pay_loc.is_visible():
+                btn_pay = pay_loc
+                break
+            alert_text = norm(await self._text(page, "#cphMain_alertBoxValue, #cphMain_messageBoxValue")).strip()
+            if alert_text:
+                raise SiteError(f"خطای سامانه سلف در ثبت پرداخت: {alert_text}")
+            await asyncio.sleep(0.2)
+
+        if not btn_pay:
             raise SiteError("دکمهٔ تأیید پرداخت نهایی در صفحه پیدا نشد")
 
         # Inject interceptors into the confirmation page before clicking btnPay

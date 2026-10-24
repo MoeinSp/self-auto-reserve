@@ -1,7 +1,9 @@
 """Web panel: friends sign up, store their site logins, and queue basket jobs."""
 
+import html
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -368,6 +370,7 @@ async def get_forgot_receipt_endpoint(
     account_id: int = Form(...),
     date: str = Form(...),
     meal: str = Form(""),
+    reserve_type: str = Form("0"),
 ):
     uid = _uid(request)
     if not uid:
@@ -381,9 +384,62 @@ async def get_forgot_receipt_endpoint(
     if not acc:
         return _back("/", "حساب پیدا نشد.", request)
     request.session["active_account_id"] = account_id
-    if not worker.fetch_forgot_receipt(uid, account_id, day, meal if meal in MEALS else ""):
+    if not worker.fetch_forgot_receipt(uid, account_id, day, meal if meal in MEALS else "", str(reserve_type)):
         return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
     return _back(f"/?account={account_id}")
+
+
+@app.get("/api/account/health")
+def account_health(request: Request, account_id: int = 0):
+    uid = _uid(request)
+    if not uid:
+        return {"status": "unknown", "status_text": "وارد پنل نشده‌اید"}
+    with db.tx() as c:
+        acc = c.execute("SELECT * FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
+    if not acc:
+        return {"status": "unknown", "status_text": "حسابی انتخاب نشده"}
+
+    op = worker.ops.get(uid)
+    if op and op.get("state") == "running":
+        return {
+            "status": "checking",
+            "status_text": f"در حال پردازش: {op.get('title', 'عملیات')}",
+            "credit": acc["credit"],
+            "display_name": acc["display_name"] or acc["site_username"],
+        }
+
+    with db.tx() as c:
+        last_err = c.execute(
+            "SELECT msg FROM logs WHERE user_id = ? AND level = 'error' ORDER BY id DESC LIMIT 1",
+            (uid,)
+        ).fetchone()
+
+    is_failed = False
+    if last_err and any(w in last_err["msg"] for w in ("رمز اشتباه", "LoginFailed", "ورود ناموفق")):
+        is_failed = True
+
+    is_task_active = (account_id in worker.tasks and not worker.tasks[account_id].done())
+
+    if is_failed:
+        status = "expired"
+        status_text = "نشست سلف منقضی شده / رمز یا کپچا نامعتبر"
+    elif is_task_active:
+        status = "online"
+        status_text = "لاگین سلف فعال و متصل (سشن معتبر)"
+    elif acc["credit"]:
+        status = "online"
+        status_text = f"لاگین فعال و متصل به سلف ({acc['display_name'] or acc['site_username']})"
+    else:
+        status = "checking"
+        status_text = "آماده بررسی و ورود به سامانه"
+
+    return {
+        "status": status,
+        "status_text": status_text,
+        "credit": acc["credit"],
+        "credit_updated_at": jalali.format_ts(acc["credit_updated_at"]) if acc["credit_updated_at"] else "",
+        "display_name": acc["display_name"] or acc["site_username"],
+    }
 
 
 @app.post("/account/pay")

@@ -246,11 +246,11 @@ class Worker:
 
         return self.start_op(user_id, "استعلام موجودی سلف", run, account_id=account_id)
 
-    def fetch_forgot_receipt(self, user_id: int, account_id: int, date: str, meal: str) -> bool:
+    def fetch_forgot_receipt(self, user_id: int, account_id: int, date: str, meal: str, reserve_type: str = "0") -> bool:
         async def run(client: CullinanClient) -> str:
             started = time.monotonic()
             await client.login()
-            res = await client.get_forgot_receipt(date, meal)
+            res = await client.get_forgot_receipt(date, meal, reserve_type)
             day_name = jalali.weekday_name(date)
             date_label = f"{day_name} {date}" if day_name else date
             meal_label = f"وعدهٔ {meal}" if meal else "وعده انتخابی"

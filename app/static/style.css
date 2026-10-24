@@ -339,6 +339,52 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 0 16
   font-size: 12px; line-height: 1.4;
 }
 
+/* ------------------------------------------------------------- account session bar */
+.account-session-bar {
+  display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px;
+  padding: 8px 14px; margin-bottom: 12px; font-size: 13px;
+}
+.session-status-content {
+  display: flex; align-items: center; gap: 8px;
+}
+.status-indicator-dot {
+  width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none;
+}
+.status-indicator-dot.online {
+  background: #10b981; box-shadow: 0 0 8px #10b981;
+  animation: pulse-dot 2s infinite;
+}
+.status-indicator-dot.checking {
+  background: #f59e0b; box-shadow: 0 0 8px #f59e0b;
+  animation: pulse-dot 1.2s infinite;
+}
+.status-indicator-dot.expired {
+  background: #ef4444; box-shadow: 0 0 8px #ef4444;
+}
+.status-indicator-dot.unknown {
+  background: #9ca3af;
+}
+@keyframes pulse-dot {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.3); opacity: 0.7; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.session-status-title {
+  color: var(--muted); font-size: 12px;
+}
+.session-status-text {
+  font-weight: 700; color: var(--text);
+}
+.session-status-timer {
+  display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted);
+}
+.tiny-refresh-btn {
+  background: none; border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px;
+  cursor: pointer; font-size: 11px; color: var(--text);
+}
+.tiny-refresh-btn:hover { border-color: var(--accent); }
+
 /* ------------------------------------------------------------- account finance */
 .account-finance-card {
   background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);

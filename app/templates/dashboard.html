@@ -95,6 +95,18 @@
 </div>
 
 {% if active_account and active_id != 'new' %}
+<div class="account-session-bar" id="sessionStatusBar">
+  <div class="session-status-content">
+    <span class="status-indicator-dot checking"></span>
+    <span class="session-status-title">وضعیت اتصال به سامانه سلف:</span>
+    <span class="session-status-text" id="sessionStatusText">در حال استعلام نشست…</span>
+  </div>
+  <div class="session-status-timer">
+    <span>📡 بررسی خودکار هر ۳۰ ثانیه</span>
+    <button type="button" class="tiny-refresh-btn" onclick="checkAccountHealth(true)" title="استعلام مجدد">🔄 بررسی فوری</button>
+  </div>
+</div>
+
 <div class="account-finance-card">
   <div class="finance-header">
     <div class="finance-status">
@@ -322,10 +334,17 @@
               <option value="صبحانه">صبحانه</option>
             </select>
           </label>
-          <button class="primary" {% if op and op.state == 'running' %}disabled{% endif %} style="margin-top:auto">
-            🎫 دریافت کد فیش
-          </button>
+          <label>نوع رزرو غذا:
+            <select name="reserve_type">
+              <option value="0" selected>رزرو هفتگی</option>
+              <option value="2">سبد غذایی</option>
+              <option value="1">روزفروش</option>
+            </select>
+          </label>
         </div>
+        <button class="primary" {% if op and op.state == 'running' %}disabled{% endif %} style="margin-top:auto">
+          🎫 دریافت کد فیش فراموشی
+        </button>
       </form>
     {% else %}
       <div class="empty">ابتدا یک حساب انتخاب یا ثبت کن.</div>
@@ -474,6 +493,37 @@ function setChargeAmount(val) {
     inp.value = val.toLocaleString();
     inp.focus();
   }
+}
+var activeAccountId = {{ active_account.id if (active_account and active_id != 'new') else 0 }};
+function checkAccountHealth(manual) {
+  if (!activeAccountId) return;
+  var txt = document.getElementById('sessionStatusText');
+  var dot = document.querySelector('.status-indicator-dot');
+  if (manual && txt) {
+    txt.innerText = 'در حال بررسی اتصال…';
+  }
+  fetch('/api/account/health?account_id=' + activeAccountId)
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      if (!data) return;
+      if (dot) {
+        dot.className = 'status-indicator-dot ' + (data.status || 'unknown');
+      }
+      if (txt && data.status_text) {
+        txt.innerText = data.status_text;
+      }
+      if (data.credit) {
+        var cr = document.querySelector('.credit-amount strong');
+        if (cr) cr.innerText = data.credit;
+      }
+    })
+    .catch(function(err) {
+      console.log('health check error', err);
+    });
+}
+if (activeAccountId > 0) {
+  checkAccountHealth();
+  setInterval(function() { checkAccountHealth(); }, 30000);
 }
 </script>
 {% endblock %}
