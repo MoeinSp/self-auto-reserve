@@ -184,6 +184,7 @@ def save_account(
     uid = _uid(request)
     if not uid:
         return _back("/login")
+    account_id = int(account_id) if str(account_id).isdigit() else 0
     username = norm(site_username).strip()
     if not username:
         return _back("/", "شماره دانشجویی را وارد کن.", request)
@@ -247,6 +248,7 @@ async def test_account(
     uid = _uid(request)
     if not uid:
         return _back("/login")
+    account_id = int(account_id) if str(account_id).isdigit() else 0
     with db.tx() as c:
         if account_id > 0:
             acc = c.execute("SELECT * FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
@@ -313,6 +315,7 @@ async def fetch_menu(
     if not day:
         return _back("/", "تاریخ را به شکل ۱۴۰۵/۰۸/۰۵ وارد کن", request)
 
+    account_id = int(account_id) if str(account_id).isdigit() else 0
     with db.tx() as c:
         if account_id > 0:
             acc = c.execute("SELECT id FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
@@ -365,6 +368,7 @@ def create_job(
     if not uid:
         return _back("/login")
 
+    account_id = int(account_id) if str(account_id).isdigit() else 0
     with db.tx() as c:
         if account_id > 0:
             acc = c.execute("SELECT id, display_name, site_username FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
