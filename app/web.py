@@ -437,7 +437,11 @@ def gateway_redirect(token: str):
     bank = sess.get("bank", "درگاه شاپرک")
     amt_str = f"{sess.get('amount_rials', 0):,} ریال"
 
-    inputs_html = "\n".join(f'<input type="hidden" name="{k}" value="{v}">' for k, v in fields.items())
+    import html
+    inputs_html = "\n".join(
+        f'<input type="hidden" name="{html.escape(str(k), quote=True)}" value="{html.escape(str(v), quote=True)}">'
+        for k, v in fields.items()
+    )
     return HTMLResponse(f"""<!DOCTYPE html>
 <html dir="rtl" lang="fa">
 <head>

@@ -259,8 +259,12 @@ class Worker:
                 msg = f"کد فیش فراموشی برای {meal_label} ({date_label}): {code}"
                 db.log(user_id, f"🎫 {msg}", "info")
                 return msg
+            if res.get("success"):
+                msg = res.get("message") or f"فیش فراموشی برای {meal_label} ({date_label}) با موفقیت صادر شد."
+                db.log(user_id, f"🎫 {msg}", "info")
+                return msg
             err_msg = res.get("message") or "فیش فراموشی صادر نشد"
-            return f"دریافت فیش برای {meal_label} ({date_label}) ناموفق: {err_msg}"
+            raise SiteError(f"دریافت فیش برای {meal_label} ({date_label}) ناموفق: {err_msg}")
 
         return self.start_op(user_id, "دریافت فیش فراموشی", run, account_id=account_id)
 

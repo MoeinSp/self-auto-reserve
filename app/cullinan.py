@@ -608,13 +608,19 @@ class CullinanClient:
         return results
 
     async def get_forgot_receipt(self, date: str, meal: str = "") -> dict:
-        """Fetch forgot card receipt code from Reservation/ForgotReceipt.aspx."""
+        """Fetch forgot card receipt code from Reservation/ForgotReceipt.aspx.
+        Handles two-step confirmation (cphMain_btnOk -> cphMain_btnAccept).
+        """
         page = await self._open("Reservation/ForgotReceipt.aspx")
 
         # 1) Set date in #cphMain_txtDate
         date_input = page.locator("#cphMain_txtDate, input[name$='txtDate']").first
         if await date_input.count() > 0:
-            await date_input.evaluate("(el, v) => el.value = v", date)
+            await date_input.evaluate("""(el, v) => {
+                el.value = v;
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+            }""", date)
 
         # 2) Set reserve type (0 = هفتگی, 2 = سبد غذایی)
         res_type = page.locator("#cphMain_drpReserveType, select[name$='drpReserveType']").first
@@ -635,87 +641,120 @@ class CullinanClient:
         await self.throttle.wait(step=True)
         await self._postback(page, btn.click)
 
-        # 5) Read alertBoxValue and messageBoxValue
-        alert_box = page.locator("#cphMain_alertBoxValue").first
-        alert_text = norm(await alert_box.inner_text()) if await alert_box.count() > 0 else ""
+        # 5) Step 2: Check for confirmation button "موافقم" (#cphMain_btnAccept) as seen in فیش 2.html
+        btn_accept = page.locator("#cphMain_btnAccept, input[name$='btnAccept'], input[value*='موافقم']").first
+        if await btn_accept.count() > 0 and await btn_accept.is_visible():
+            await self.throttle.wait(step=True)
+            await self._postback(page, btn_accept.click)
 
-        msg_box = page.locator("#cphMain_messageBoxValue").first
-        msg_text = norm(await msg_box.inner_text()) if await msg_box.count() > 0 else ""
+        # 6) Read alert and messages
+        alert_text = ""
+        for sel in ("#cphMain_alertBoxValue", ".toast-message", ".alertBox", "#toast-container"):
+            loc = page.locator(sel).first
+            if await loc.count() > 0:
+                txt = norm(await loc.inner_text()).strip()
+                if txt:
+                    alert_text = txt
+                    break
 
-        full_text = " ".join(filter(None, [alert_text, msg_text, " ".join(self.dialogs[-2:])]))
+        if not alert_text and self.dialogs:
+            alert_text = norm(self.dialogs[-1]).strip()
 
+        # Extract code from alert_text or receipt labels
         code = ""
         patterns = [
-            r"(?:کد|شماره)\s*(?:فیش|فراموشی|ژتون|بارکد)\s*[:=\-]?\s*(\d{4,10})",
-            r"(\d{4,8})",
+            r"(?:کد|شماره)\s*(?:فیش|فراموشی|ژتون|بارکد)\s*[:=\-]?\s*(\d{3,12})",
+            r"(\d{4,10})",
         ]
-        if "موفق" in full_text or "کد" in full_text or "فیش" in full_text or not any(h in full_text for h in ("غیرفعال", "خطا", "یافت نشد", "ندارید", "خارج از بازه")):
+        has_error = any(h in alert_text for h in ("غیرفعال", "خطا", "یافت نشد", "ندارید", "خارج از بازه", "امکان", "سقف", "ناموفق", "پایان"))
+        if alert_text and not has_error:
             for pat in patterns:
-                m = re.search(pat, alert_text or full_text)
+                m = re.search(pat, alert_text)
                 if m:
                     code = m.group(1)
                     break
 
+        # Also check any specific barcode/receipt labels on page if code not found in alert
+        if not code and not has_error:
+            for code_sel in ("[id$='lblBarcode']", "[id$='lblReceiptCode']", "[id$='lblFish']", "[id$='lblCode']", ".receipt-code", "#cphMain_lblResult"):
+                loc = page.locator(code_sel).first
+                if await loc.count() > 0:
+                    c_text = norm(await loc.inner_text()).strip()
+                    m = re.search(r"(\d{3,12})", c_text)
+                    if m:
+                        code = m.group(1)
+                        break
+
+        success = bool(code) or ("با موفقیت" in alert_text and not has_error)
+        msg = alert_text
+        if not msg:
+            if code:
+                msg = f"کد فیش فراموشی: {code}"
+            else:
+                msg = "دریافت فیش فراموشی امکان‌پذیر نشد (احتمالاً خارج از بازه زمانی مجاز یا عدم وجود غذای رزروشده در این وعده)"
+
         return {
-            "success": bool(code),
+            "success": success,
             "code": code,
-            "message": alert_text or msg_text or full_text or ("کد فیش با موفقیت صادر شد" if code else "پاسخی از سامانه دریافت نشد"),
+            "message": msg,
             "date": date,
             "meal": meal,
         }
 
     async def create_payment_session(self, amount_rials: int, bank_idx: int = 1) -> dict:
         """Navigate to ePay/ePay_Payment.aspx, enter amount, click bank logo,
-        and capture the direct bank gateway redirection / form data.
+        confirm on Step 2 (#cphMain_btnPay), and capture direct bank gateway data.
         bank_idx: 0 = Sadad (Melli), 1 = BehPardakht (Mellat)
         """
         page = await self._open("ePay/ePay_Payment.aspx")
 
-        # Inject interceptor hooks into the page for bank redirect functions
-        await page.evaluate("""
-            () => {
-                window.__paymentData = null;
-                window.postToBehPardakht = function(refId) {
-                    window.__paymentData = {
-                        action: "https://bpm.shaparak.ir/pgwchannel/startpay.mellat",
-                        method: "POST",
-                        fields: { RefId: refId },
-                        bank: "به پرداخت ملت"
-                    };
-                };
-                window.postToSadad = function(merchantId, terminalId, timeStamp, amount, paymentId, FP, revertURL) {
-                    window.__paymentData = {
-                        action: "https://sadad.shaparak.ir/purchase",
-                        method: "POST",
-                        fields: {
-                            CardAcqID: merchantId,
-                            AmountTrans: amount,
-                            ORDERID: paymentId,
-                            TerminalID: terminalId,
-                            TimeStamp: timeStamp,
-                            FP: FP,
-                            RedirectURL: revertURL
-                        },
-                        bank: "سداد (بانک ملی)"
-                    };
-                };
-                window.postToSamanKish = function(token) {
-                    window.__paymentData = {
-                        action: "https://sep.shaparak.ir/OnlinePG/OnlinePG",
-                        method: "POST",
-                        fields: { Token: token },
-                        bank: "سامان کیش"
-                    };
-                };
-            }
-        """)
+        captured_data: dict = {}
 
-        # Set payment amount
+        # Route interceptor: catch any request heading towards Shaparak / payment gateways
+        async def on_route(route, request):
+            url = request.url
+            if any(domain in url for domain in ("shaparak.ir", "cbinasim.ir", "hadaf.cfu.ac.ir")):
+                post_data = request.post_data or ""
+                fields = {}
+                if post_data:
+                    from urllib.parse import parse_qs
+                    try:
+                        parsed = parse_qs(post_data)
+                        fields = {k: v[0] if len(v) == 1 else v for k, v in parsed.items()}
+                    except Exception:
+                        pass
+                bank_name = "به‌پرداخت ملت" if "bpm.shaparak" in url else ("سداد (بانک ملی)" if "sadad" in url else "درگاه شاپرک")
+                captured_data.update({
+                    "action": url,
+                    "method": request.method,
+                    "fields": fields,
+                    "bank": bank_name,
+                })
+                try:
+                    await route.abort()
+                except Exception:
+                    pass
+            else:
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
+
+        await page.route("**/*", on_route)
+
+        # Step 1: Set payment amount
         amount_str = f"{amount_rials:,}"
         amt_input = page.locator("#cphMain_txtPaymentAmount, input[name$='txtPaymentAmount']").first
         if await amt_input.count() == 0:
             raise SiteError("فیلد مبلغ در صفحه پرداخت پیدا نشد")
-        await amt_input.evaluate("(el, v) => el.value = v", amount_str)
+
+        await amt_input.fill(amount_str)
+        await amt_input.evaluate("""(el, v) => {
+            el.value = v;
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('keyup', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+        }""", amount_str)
 
         # Select bank button: #cphMain_dataLstBank_imgBankLogo_0 (Sadad) or _1 (Mellat)
         bank_sel = f"#cphMain_dataLstBank_imgBankLogo_{bank_idx}"
@@ -726,15 +765,88 @@ class CullinanClient:
             raise SiteError("درگاه بانکی در صفحه یافت نشد")
 
         await self.throttle.wait(step=True)
-        await btn.click()
+        await self._postback(page, btn.click)
 
-        # Wait for __paymentData to be populated
-        for _ in range(25):
-            data = await page.evaluate("() => window.__paymentData")
-            if data and data.get("action"):
-                data["amount_rials"] = amount_rials
-                return data
-            await asyncio.sleep(0.2)
+        # Step 2: Now on confirmation screen (cphMain_tblResult from خرید 2.html)
+        btn_pay = page.locator("#cphMain_btnPay, input[name$='btnPay'], input[value*='پرداخت']").first
+        if await btn_pay.count() == 0:
+            alert = norm(await self._text(page, "#cphMain_alertBoxValue, #cphMain_messageBoxValue"))
+            if alert:
+                raise SiteError(f"خطای سامانه سلف در ثبت پرداخت: {alert}")
+            raise SiteError("دکمهٔ تأیید پرداخت نهایی در صفحه پیدا نشد")
+
+        # Inject interceptors into the confirmation page before clicking btnPay
+        await page.evaluate("""
+            () => {
+                window.__paymentData = null;
+                const setPay = (action, method, fields, bank) => {
+                    window.__paymentData = { action, method, fields, bank };
+                };
+                window.postToBehPardakht = function(refId) {
+                    setPay("https://bpm.shaparak.ir/pgwchannel/startpay.mellat", "POST", { RefId: refId }, "به‌پرداخت ملت");
+                };
+                window.postToSadad = function(merchantId, terminalId, timeStamp, amount, paymentId, FP, revertURL) {
+                    setPay("https://sadad.shaparak.ir/purchase", "POST", {
+                        CardAcqID: merchantId,
+                        AmountTrans: amount,
+                        ORDERID: paymentId,
+                        TerminalID: terminalId,
+                        TimeStamp: timeStamp,
+                        FP: FP,
+                        RedirectURL: revertURL
+                    }, "سداد (بانک ملی)");
+                };
+                window.postToSamanKish = function(token) {
+                    setPay("https://sep.shaparak.ir/OnlinePG/OnlinePG", "POST", { Token: token, GetMethod: "" }, "سامان کیش");
+                };
+                window.postToIranKish = function(merchantId, token) {
+                    setPay("https://ikc.shaparak.ir/TPayment/Payment/index", "POST", { merchantId: merchantId, token: token }, "ایران کیش");
+                };
+                window.postToIranKishNew = function(merchantId, token) {
+                    setPay("https://ikc.shaparak.ir/iuiv3/IPG/Index", "POST", { tokenIdentity: token }, "ایران کیش");
+                };
+                window.postToOmidPay = function(token, language) {
+                    setPay("https://say.shaparak.ir/_ipgw_/MainTemplate/payment/", "POST", { token: token, language: language || "fa" }, "امید پی");
+                };
+                window.postToSepehrSaderat = function(token, terminalID) {
+                    setPay("https://sepehr.shaparak.ir:8080/Pay", "POST", { token: token, terminalID: terminalID }, "سپهر صادرات");
+                };
+                const _origSubmit = HTMLFormElement.prototype.submit;
+                HTMLFormElement.prototype.submit = function() {
+                    const action = this.action || window.location.href;
+                    if (action.includes("shaparak.ir") || action.includes("cbinasim.ir") || action.includes("cfu.ac.ir")) {
+                        const fd = new FormData(this);
+                        const fields = {};
+                        for (const [k, v] of fd.entries()) { fields[k] = v; }
+                        setPay(action, (this.method || "POST").toUpperCase(), fields, "درگاه شاپرک");
+                        return;
+                    }
+                    return _origSubmit.apply(this, arguments);
+                };
+            }
+        """)
+
+        # Click payment button (#cphMain_btnPay)
+        await self.throttle.wait(step=True)
+        try:
+            await self._postback(page, btn_pay.click)
+        except Exception:
+            # Navigation or abort may happen when clicking pay
+            pass
+
+        # Wait for either route interception or JS variable
+        for _ in range(40):
+            if captured_data.get("action"):
+                captured_data["amount_rials"] = amount_rials
+                return captured_data
+            try:
+                data = await page.evaluate("() => window.__paymentData")
+                if data and data.get("action"):
+                    data["amount_rials"] = amount_rials
+                    return data
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
 
         alert = norm(await self._text(page, "#cphMain_alertBoxValue, #cphMain_messageBoxValue"))
         if alert:
