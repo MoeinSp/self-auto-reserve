@@ -25,6 +25,7 @@ app = FastAPI()
 # Logged-in pages keep a request open (like the real site), so "wait until the
 # network is quiet" must not wait for it.
 LONG_POLL = "<script>fetch('/poll')</script>"
+PROFILE_SNIPPET = '<div id="divUsername" class="profileTitle">معین فیروزآبادی</div><label id="lblCredit">3,345,000 ریال</label>'
 
 
 @app.get("/poll")
@@ -43,7 +44,7 @@ def _opts(values, selected):
 @app.get("/")
 def login_page(request: Request, error: str = ""):
     if request.cookies.get("auth") == "ok":
-        return HTMLResponse(f"<html><body>داشبورد{LONG_POLL}</body></html>")
+        return HTMLResponse(f"<html><body>{PROFILE_SNIPPET}داشبورد{LONG_POLL}</body></html>")
     msg = f'<span id="lblMessage">{error}</span>' if error else ""
     # Like the real site: inputs are readonly until focused, and the news box
     # embeds images from another host (which the bot should not wait for).
@@ -131,6 +132,7 @@ async def basket(request: Request):
           {_row_controls(prefix, i, foods, food, f.get(f"count{i}", "1"), enabled, True)}
           <td>{'' if enabled else f'<img id="{prefix}_imgStaus_{i}" title="غیرفعال">'}</td></tr>"""
     return HTMLResponse(f"""<html><body><form method="post">
+      {PROFILE_SNIPPET}
       <label id="cphMain_messageBoxValue">{message}</label>
       <input type="hidden" name="shown_date" value="{date}">
       <input type="text" id="cphMain_txtDate" name="txtDate" value="{date}">
@@ -168,16 +170,18 @@ async def reservation(request: Request):
             foods = [(str(n), f"{name} 250000 ریال") for n, name in enumerate(info.get("foods", []), 1)]
             reserved = info.get("reserved")
             chosen = next((v for v, t in foods if reserved and t.startswith(reserved)), foods[0][0] if foods else "-1")
-            enabled = bool(foods) and not info.get("locked")
-            status = "رزرو شده" if reserved else ("" if enabled else "غیرفعال")
-            rows += f"""<tr{'' if enabled else ' class="aspNetDisabled"'}>
-              <td><input type="checkbox" id="{prefix}_chkReserve_{i}"{" checked" if reserved else ""}{'' if enabled else DISABLED}></td>
-              <td>روز {day}</td><td>{_row_controls(prefix, i, foods, chosen, "1", enabled, False)}
-              <td>{f'<img id="{prefix}_imgStaus_{i}" title="{status}">' if status else ''}</td></tr>"""
-        grids += f"""<div id="tabs-{suffix}"><table id="{prefix}"><tr><th></th><th>روز</th></tr>{rows}</table></div>"""
+            checked = ' checked="checked"' if reserved else ""
+            status = '<img id="{prefix}_imgStaus_{i}" title="رزرو شده">' if reserved else ""
+            rows += f"""<tr>
+              <td><input type="checkbox" id="{prefix}_chkReserve_{i}" name="chk{i}"{checked}{'' if not info.get('locked') else DISABLED}></td>
+              <td>{day}</td><td>
+              {_row_controls(prefix, i, foods, chosen, "1", not info.get('locked'), False)}
+              <td>{status}</td></tr>"""
+        grids += f'<table id="{prefix}">{rows}</table>'
     return HTMLResponse(f"""<html><body><form method="post">
+      {PROFILE_SNIPPET}
+      <label id="cphMain_lblWeekDate">{days[0]} الی {days[-1]}</label>
       <input type="hidden" name="week" value="{week}">
-      <input type="image" id="cphMain_imgbtnLastWeek" name="prev" src="/prev.png" style="width:30px;height:30px">
-      <label id="cphMain_lblWeekDate">{days[0]}  الی  {days[-1]}</label>
-      <input type="image" id="cphMain_imgbtnNextWeek" name="next" src="/next.png" style="width:30px;height:30px">
+      <input type="image" id="cphMain_imgbtnLastWeek" name="prev" src="/prev.png">
+      <input type="image" id="cphMain_imgbtnNextWeek" name="next" src="/next.png">
       {grids}</form>{LONG_POLL}</body></html>""")

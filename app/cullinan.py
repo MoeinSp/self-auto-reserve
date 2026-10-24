@@ -38,6 +38,9 @@ SEL = {
     "week_label": "[id$='lblWeekDate']",
     "week_next": "[id$='imgbtnNextWeek']",
     "week_prev": "[id$='imgbtnLastWeek']",
+    "profile_name": "#divUsername, [id$='divUsername'], #cphMain_titleBoxValue, [id$='titleBoxValue']",
+    "profile_id": "#lblIdNumber, [id$='lblIdNumber']",
+    "profile_credit": "#lblCredit, [id$='lblCredit']",
 }
 RESERVATION_PATH = "Reservation/Reservation.aspx"
 WEEK_GRIDS = {"صبحانه": "Breakfast", "ناهار": "Lunch", "شام": "Dinner"}
@@ -166,6 +169,7 @@ class CullinanClient:
         self.interactive = False
         self.poll_interval: float | None = None  # per-job polling interval (seconds), None = default
         self.captcha_attempts = 0  # of the last successful login, for the login test report
+        self.display_name = ""  # real name from site portal profile
 
     async def _page(self) -> Page:
         if self.page is None or self.page.is_closed():
@@ -285,6 +289,36 @@ class CullinanClient:
         await field.evaluate("el => el.removeAttribute('readonly')")
         await field.fill(value)
 
+    async def read_profile(self) -> dict:
+        """Read student profile details (name, student number, credit) after login."""
+        page = self.page or await self._page()
+        name = ""
+        for sel in ("#divUsername", "[id$='divUsername']", "#cphMain_titleBoxValue", "[id$='titleBoxValue']"):
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0:
+                    txt = norm(await loc.inner_text())
+                    if "کاربر:" in txt:
+                        m = re.search(r"کاربر:\s*([^-]+)", txt)
+                        if m:
+                            name = m.group(1).strip()
+                            break
+                    elif txt and len(txt) > 2 and not txt.isdigit():
+                        name = txt
+                        break
+            except Exception:
+                pass
+        credit = ""
+        try:
+            loc = page.locator("#lblCredit, [id$='lblCredit']").first
+            if await loc.count() > 0:
+                credit = norm(await loc.inner_text())
+        except Exception:
+            pass
+        if name:
+            self.display_name = name
+        return {"name": name, "credit": credit}
+
     # ---------------------------------------------------------------- login
     async def login(self) -> None:
         self.throttle.login_attempt()
@@ -313,6 +347,7 @@ class CullinanClient:
             if not await self._on_login_page(page):
                 self.captcha_attempts = attempt
                 log.info("logged in as %s in %.1fs (captcha attempt %d)", self.username, time.monotonic() - started, attempt)
+                await self.read_profile()
                 return
             error = norm(await self._text(page, SEL["login_error"]) + " " + " ".join(self.dialogs[-1:]))
             if any(h in error for h in WRONG_PASSWORD_HINTS) and "امنیتی" not in error and "تصویر" not in error:

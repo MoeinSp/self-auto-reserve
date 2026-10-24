@@ -53,35 +53,107 @@
 <div class="stats">
   <div class="stat active"><b>{{ active }}</b><span>در حال پیگیری</span></div>
   <div class="stat ok"><b>{{ done }}</b><span>خریداری‌شده</span></div>
-  <div class="stat account"><b>{{ account.site_username if account else 'ثبت نشده' }}</b><span>حساب سامانهٔ سلف</span></div>
+  <div class="stat account">
+    <b>{{ accounts|length }} حساب</b>
+    <span>حساب‌های متصل سلف</span>
+  </div>
+</div>
+
+<div class="account-nav-bar">
+  <div class="account-nav-title">انتخاب حساب سامانهٔ سلف:</div>
+  <div class="account-chips">
+    {% for acc in accounts %}
+      <a href="/?account={{ acc.id }}" class="acc-chip {% if active_account and acc.id == active_account.id and active_id != 'new' %}active{% endif %}">
+        <span class="acc-avatar">👤</span>
+        <span class="acc-info">
+          <strong>{{ acc.display_name or acc.site_username }}</strong>
+          {% if acc.display_name %}<small>{{ acc.site_username }}</small>{% endif %}
+        </span>
+        {% if active_account and acc.id == active_account.id and active_id != 'new' %}
+          <span class="acc-check">✓</span>
+        {% endif %}
+      </a>
+    {% endfor %}
+    <a href="/?account=new" class="acc-chip new-chip {% if active_id == 'new' or not accounts %}active{% endif %}">
+      <span>➕ افزودن حساب جدید</span>
+    </a>
+  </div>
 </div>
 
 <div class="grid2">
   <section class="card">
-    <div class="card-head"><span class="step">۱</span><h2>اطلاعات ورود سامانهٔ سلف</h2></div>
-    {% if account %}<div class="saved">رمز سامانه برای&nbsp;<b>{{ account.site_username }}</b>&nbsp;ذخیره شده است (رمزنگاری‌شده).</div>{% endif %}
-    <form method="post" action="/account">
-      <label>شماره دانشجویی <input name="site_username" required inputmode="numeric" value="{{ account.site_username if account else '' }}"></label>
-      <label>رمز سامانه
-        {% if account %}
-        <input name="site_password" type="password" autocomplete="new-password" placeholder="•••••••• ذخیره شده — فقط برای تغییر بنویس">
-        {% else %}
-        <input name="site_password" type="password" required autocomplete="new-password">
-        {% endif %}
-      </label>
-      <div class="btns">
-        <button>ذخیره</button>
-        <button class="secondary" formaction="/account/test" formnovalidate {% if op and op.state == 'running' %}disabled{% endif %}>
-          {% if account %}تست ورود{% else %}ذخیره و تست ورود{% endif %}
-        </button>
+    {% if active_account and active_id != 'new' %}
+      <div class="card-head">
+        <span class="step">۱</span>
+        <h2>اطلاعات حساب: {{ active_account.display_name or active_account.site_username }}</h2>
       </div>
-      <p class="note">«تست ورود» با کپچا وارد سامانه می‌شود و باز شدن صفحهٔ سبد غذایی را هم چک می‌کند. اگر رمز جدید نوشته باشی، اول ذخیره‌اش می‌کند.</p>
-    </form>
+      <div class="saved">
+        رمز برای <b>{{ active_account.display_name or 'این حساب' }}</b> ({{ active_account.site_username }}) ذخیره شده است.
+      </div>
+      <form method="post" action="/account">
+        <input type="hidden" name="account_id" value="{{ active_account.id }}">
+        <label>شماره دانشجویی
+          <input name="site_username" required inputmode="numeric" value="{{ active_account.site_username }}">
+        </label>
+        <label>نام دانشجو (در سامانهٔ سلف)
+          <input name="display_name" value="{{ active_account.display_name or '' }}" placeholder="با زدن «تست ورود» خودکار از سلف پر می‌شود">
+        </label>
+        <label>رمز سامانهٔ سلف
+          <input name="site_password" type="password" autocomplete="new-password" placeholder="•••••••• ذخیره شده — فقط برای تغییر بنویس">
+        </label>
+        <div class="btns">
+          <button>ذخیره تغییرات</button>
+          <button class="secondary" formaction="/account/test" formnovalidate {% if op and op.state == 'running' %}disabled{% endif %}>
+            تست ورود و دریافت نام
+          </button>
+          <button class="secondary danger-btn" formaction="/account/delete" formnovalidate onclick="return confirm('آیا این حساب و کارهای مربوط به آن حذف شوند؟')">
+            حذف حساب
+          </button>
+        </div>
+        <p class="note">با زدن «تست ورود و دریافت نام»، ربات وارد سامانه می‌شود و نام شخص را خودکار از سلف برداشته و ذخیره می‌کند.</p>
+      </form>
+    {% else %}
+      <div class="card-head">
+        <span class="step">۱</span>
+        <h2>افزودن حساب جدید سلف</h2>
+      </div>
+      <form method="post" action="/account">
+        <input type="hidden" name="account_id" value="0">
+        <label>شماره دانشجویی
+          <input name="site_username" required inputmode="numeric" placeholder="مثلاً 402407036">
+        </label>
+        <label>نام دانشجو (اختیاری — پس از ورود خودکار پر می‌شود)
+          <input name="display_name" placeholder="مثلاً معین فیروزآبادی">
+        </label>
+        <label>رمز سامانهٔ سلف
+          <input name="site_password" type="password" required autocomplete="new-password">
+        </label>
+        <div class="btns">
+          <button>افزودن حساب</button>
+        </div>
+        <p class="note">پس از افزودن حساب، می‌توانید با «تست ورود و دریافت نام» مطمئن شوید اطلاعات درست است و نام به صورت خودکار از سایت استخراج می‌شود.</p>
+      </form>
+    {% endif %}
   </section>
 
   <section class="card">
     <div class="card-head"><span class="step">۲</span><h2>خرید خودکار از سبد غذایی</h2></div>
     <form method="post" action="/jobs">
+      {% if accounts|length > 1 %}
+      <label>خرید برای حساب دانشجو:
+        <select name="account_id">
+          {% for acc in accounts %}
+            <option value="{{ acc.id }}" {% if active_account and acc.id == active_account.id %}selected{% endif %}>
+              {{ acc.display_name or acc.site_username }} ({{ acc.site_username }})
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      {% elif accounts %}
+      <input type="hidden" name="account_id" value="{{ accounts[0].id }}">
+      <div class="acc-selected-badge">حساب هدف: <b>{{ accounts[0].display_name or accounts[0].site_username }}</b> ({{ accounts[0].site_username }})</div>
+      {% endif %}
+
       {% set menu_meal = (menu|list)[0] if menu and menu|length == 1 else '' %}
       <div class="row">
         <label>تاریخ <input name="date" value="{{ menu_date or today }}" required placeholder="1405/08/05" dir="ltr"></label>
@@ -131,7 +203,7 @@
         <label>فقط از ساعت <input name="active_from" type="time"></label>
         <label>تا ساعت <input name="active_to" type="time"></label>
       </div>
-      <p class="note">پیش‌فرض هر {{ poll_seconds|int }} ثانیه است. سرعت بالا (مثلاً ۱ یا ۲ ثانیه) سقف {{ max_per_hour }} درخواست در ساعت را زود پر می‌کند و بعدش ربات تا آزاد شدن سقف صبر می‌کند؛ بهتر است سرعت بالا را فقط با «از ساعت / تا ساعت» برای زمان باز شدن سبد بگذاری.</p>
+      <p class="note">پیش‌فرض هر {{ poll_seconds|int }} ثانیه است. سرعت بالا سقف {{ max_per_hour }} درخواست در ساعت را زود پر می‌کند؛ بهتر است سرعت بالا را فقط با «از ساعت / تا ساعت» تنظیم کنید.</p>
       <button class="block">شروع پیگیری</button>
     </form>
   </section>
@@ -149,7 +221,10 @@
     <div class="job">
       <div class="job-date"><b>{{ j.date }}</b><span>{{ j.meal or 'هر وعده' }}</span></div>
       <div>
-        <div class="job-foods">{{ j.foods.splitlines()|join('، ') }} <span class="qty">×{{ j.quantity }}</span></div>
+        <div class="job-foods">
+          <span class="job-acc-chip">👤 {{ j.account_name or j.site_username or 'سلف' }}</span>
+          {{ j.foods.splitlines()|join('، ') }} <span class="qty">×{{ j.quantity }}</span>
+        </div>
         <span class="badge {{ j.status }}">{{ STATUS_FA[j.status] }}</span>
         <span class="job-meta">
           {% if j.attempts %}تلاش {{ j.attempts }}{% else %}هنوز بررسی نشده{% endif %}

@@ -93,6 +93,14 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "bought", result.message)
         self.assertEqual(fake_site.PURCHASES, [("1405/08/05", "شام", "عدس پلو", 1)])
 
+    async def test_reads_profile_name_and_credit(self):
+        c = self.client()
+        await c.login()
+        profile = await c.read_profile()
+        await c.close()
+        self.assertEqual(profile.get("name"), "معین فیروزآبادی")
+        self.assertIn("3,345,000", profile.get("credit", ""))
+
     async def test_reads_menu_and_reservations_from_week_page(self):
         fake_site.MENU["1405/08/05"] = {
             "ناهار": {"foods": ["جوجه کباب", "خوراک مرغ"], "reserved": "خوراک مرغ"},
@@ -220,10 +228,36 @@ class UnitTest(unittest.TestCase):
         self.assertEqual(db.count_attempt(1, "x"), 1)
         self.assertEqual(db.count_attempt(1, "y"), 2)
 
-    def test_background_endpoints_run_on_event_loop(self):
-        # Sync endpoints run in a thread pool, where starting the background task fails.
-        import inspect
+    def test_multiple_accounts_migration_and_support(self):
+        from starlette.requests import Request
+        from app import web, db, config
 
+        config.SECRET_KEY = "test-secret"
+        db.init()
+        with db.tx() as c:
+            c.execute("DELETE FROM accounts")
+            c.execute("DELETE FROM users")
+            c.execute("INSERT INTO users (id, username, password_hash, created_at) VALUES (1, 'tester', 'hash', 0)")
+
+        req = Request({"type": "http", "session": {"uid": 1}, "query_string": b""})
+        # 1) Add first account
+        res = web.save_account(req, site_username="40111111", site_password="pass1", display_name="کاربر اول")
+        self.assertEqual(res.status_code, 303)
+
+        # 2) Add second account for same user
+        res = web.save_account(req, site_username="40222222", site_password="pass2", display_name="کاربر دوم")
+        self.assertEqual(res.status_code, 303)
+
+        with db.tx() as c:
+            accs = c.execute("SELECT site_username, display_name FROM accounts WHERE user_id = 1 ORDER BY id").fetchall()
+            self.assertEqual(len(accs), 2)
+            self.assertEqual(accs[0]["site_username"], "40111111")
+            self.assertEqual(accs[0]["display_name"], "کاربر اول")
+            self.assertEqual(accs[1]["site_username"], "40222222")
+            self.assertEqual(accs[1]["display_name"], "کاربر دوم")
+
+    def test_background_endpoints_run_on_event_loop(self):
+        import inspect
         from app import web
 
         self.assertTrue(inspect.iscoroutinefunction(web.test_account))
@@ -238,27 +272,27 @@ class UnitTest(unittest.TestCase):
 
         orig_invite = config.INVITE_CODE
         try:
-            config.SECRET_KEY = 'test-secret'
+            config.SECRET_KEY = "test-secret"
             with db.tx() as c:
-                c.execute('DELETE FROM users')
+                c.execute("DELETE FROM users")
             # 1) First user registers without invite code
-            config.INVITE_CODE = 'SECRET123'
-            req = Request({'type': 'http', 'session': {}})
-            res = web.register(req, username='user1', password='password123', invite='')
+            config.INVITE_CODE = "SECRET123"
+            req = Request({"type": "http", "session": {}})
+            res = web.register(req, username="user1", password="password123", invite="")
             self.assertEqual(res.status_code, 303)
-            self.assertIn('ثبت‌نام انجام شد', req.session.get('flash', ''))
+            self.assertIn("ثبت‌نام انجام شد", req.session.get("flash", ""))
 
             # 2) Second user with wrong invite code is rejected
-            req = Request({'type': 'http', 'session': {}})
-            res = web.register(req, username='user2', password='password123', invite='WRONG')
-            self.assertEqual(req.session.get('flash'), 'کد دعوت نادرست است')
+            req = Request({"type": "http", "session": {}})
+            res = web.register(req, username="user2", password="password123", invite="WRONG")
+            self.assertEqual(req.session.get("flash"), "کد دعوت نادرست است")
 
             # 3) Second user with empty invite code when INVITE_CODE is unset succeeds
-            config.INVITE_CODE = ''
-            req = Request({'type': 'http', 'session': {}})
-            res = web.register(req, username='user2', password='password123', invite='')
+            config.INVITE_CODE = ""
+            req = Request({"type": "http", "session": {}})
+            res = web.register(req, username="user2", password="password123", invite="")
             self.assertEqual(res.status_code, 303)
-            self.assertIn('ثبت‌نام انجام شد', req.session.get('flash', ''))
+            self.assertIn("ثبت‌نام انجام شد", req.session.get("flash", ""))
         finally:
             config.INVITE_CODE = orig_invite
 

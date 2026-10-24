@@ -1,4 +1,4 @@
-"""Background loop: one task per user that has active jobs."""
+"""Background loop: one task per student account that has active jobs."""
 import asyncio
 import json
 import logging
@@ -30,13 +30,6 @@ def _in_window(job_row) -> bool:
     return now >= start or now <= end  # window passes midnight
 
 
-def _active_jobs(user_id: int) -> list:
-    with db.tx() as c:
-        return c.execute(
-            "SELECT * FROM jobs WHERE user_id = ? AND status = 'active' ORDER BY id", (user_id,)
-        ).fetchall()
-
-
 OP_TIMEOUT = 600  # covers a manual captcha wait (CAPTCHA_MANUAL_TIMEOUT)
 RESERVATION_RECHECK = 600  # seconds between "is this meal already reserved?" checks per job
 
@@ -61,10 +54,10 @@ def _explain(exc: Exception) -> str:
 
 class Worker:
     def __init__(self):
-        self.tasks: dict[int, asyncio.Task] = {}
-        self.throttles: dict[int, Throttle] = {}
+        self.tasks: dict[int, asyncio.Task] = {}  # account_id -> task
+        self.throttles: dict[int, Throttle] = {}  # account_id -> Throttle
         # One on-demand operation (login test / menu fetch) per user, shown on the dashboard.
-        self.ops: dict[int, dict] = {}
+        self.ops: dict[int, dict] = {}  # user_id -> op dict
         self.reservation_checked: dict[int, float] = {}  # job id -> monotonic time of last check
         self._pw = None
         self.browser = None
@@ -87,28 +80,33 @@ class Worker:
         while True:
             try:
                 with db.tx() as c:
-                    users = [
-                        r["user_id"]
+                    active_accounts = [
+                        r["account_id"]
                         for r in c.execute(
-                            "SELECT DISTINCT j.user_id FROM jobs j JOIN accounts a ON a.user_id = j.user_id "
-                            "WHERE j.status = 'active'"
+                            "SELECT DISTINCT j.account_id FROM jobs j JOIN accounts a ON a.id = j.account_id "
+                            "WHERE j.status = 'active' AND j.account_id IS NOT NULL"
                         )
                     ]
-                for uid in users:
-                    task = self.tasks.get(uid)
+                for aid in active_accounts:
+                    task = self.tasks.get(aid)
                     if task is None or task.done():
-                        self.tasks[uid] = asyncio.create_task(self._run_user(uid))
+                        self.tasks[aid] = asyncio.create_task(self._run_account(aid))
             except Exception:
                 log.exception("supervisor error")
             await asyncio.sleep(5)
 
-    def throttle(self, user_id: int) -> Throttle:
+    def throttle(self, account_id: int) -> Throttle:
         # Kept across task restarts so limits survive a job being re-created.
-        return self.throttles.setdefault(user_id, Throttle())
+        return self.throttles.setdefault(account_id, Throttle())
 
-    def client_for(self, user_id: int, own_lane: bool = False) -> CullinanClient:
+    def client_for(self, account_id: int, own_lane: bool = False) -> CullinanClient:
         with db.tx() as c:
-            acc = c.execute("SELECT * FROM accounts WHERE user_id = ?", (user_id,)).fetchone()
+            acc = c.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        if not acc:
+            raise SiteError("اطلاعات حساب سامانه سلف پیدا نشد")
+
+        user_id = acc["user_id"]
+        acc_label = acc["display_name"] or acc["site_username"]
 
         async def solve(png: bytes, attempt: int) -> str | None:
             if attempt <= captcha.config.CAPTCHA_OCR_TRIES:
@@ -117,10 +115,10 @@ class Worker:
                     return code
                 if attempt < captcha.config.CAPTCHA_OCR_TRIES:
                     return None
-            db.log(user_id, "کپچا خوانده نشد؛ لطفاً در پنل واردش کن", "warn")
+            db.log(user_id, f"کپچای حساب «{acc_label}» خوانده نشد؛ لطفاً در پنل واردش کن", "warn")
             return await captcha.manual.ask(user_id, png)
 
-        throttle = self.throttle(user_id)
+        throttle = self.throttle(account_id)
         return CullinanClient(
             self.browser, acc["site_username"], security.decrypt(acc["site_password_enc"]),
             throttle.lane() if own_lane else throttle, solve,
@@ -130,14 +128,20 @@ class Worker:
         op = self.ops.get(user_id)
         return bool(op and op["state"] == "running")
 
-    def start_op(self, user_id: int, title: str, run: Callable[[CullinanClient], Awaitable[str]]) -> bool:
+    def start_op(self, user_id: int, title: str, run: Callable[[CullinanClient], Awaitable[str]], account_id: int = 0) -> bool:
         """Run `run` in the background with its own browser session; False if one is already running."""
         if self.busy(user_id):
             return False
-        op = self.ops[user_id] = {"title": title, "state": "running", "message": "", "started": time.time()}
+        op = self.ops[user_id] = {
+            "title": title,
+            "state": "running",
+            "message": "",
+            "started": time.time(),
+            "account_id": account_id,
+        }
 
         async def go():
-            client = self.client_for(user_id, own_lane=True)
+            client = self.client_for(account_id, own_lane=True)
             client.interactive = True
             try:
                 op["message"] = await asyncio.wait_for(run(client), OP_TIMEOUT)
@@ -145,7 +149,7 @@ class Worker:
                 db.log(user_id, f"{title}: {op['message']}", "success")
             except Exception as exc:
                 if not isinstance(exc, (LoginFailed, RateLimited, SiteError, asyncio.TimeoutError)):
-                    log.exception("%s failed for user %s", title, user_id)
+                    log.exception("%s failed for user %s (account %s)", title, user_id, account_id)
                 op["state"], op["message"] = "error", _explain(exc)
                 db.log(user_id, f"{title} ناموفق: {op['message']}", "error")
             finally:
@@ -159,27 +163,38 @@ class Worker:
             raise
         return True
 
-    def test_login(self, user_id: int) -> bool:
+    def test_login(self, user_id: int, account_id: int) -> bool:
         async def run(client: CullinanClient) -> str:
-            # Stops right after a successful login: that is what the user wants to know.
             started = time.monotonic()
             await client.login()
+            profile = await client.read_profile()
+            name = profile.get("name") or client.username
+            if name:
+                with db.tx() as c:
+                    c.execute("UPDATE accounts SET display_name = ? WHERE id = ?", (name, account_id))
             tries = f"، کپچا در تلاش {client.captcha_attempts} حل شد" if client.captcha_attempts > 1 else ""
-            return f"ورود موفق بود ({time.monotonic() - started:.0f} ثانیه{tries})."
+            credit_str = f" · اعتبار: {profile['credit']}" if profile.get("credit") else ""
+            return f"ورود موفق بود. نام در سامانه: «{name}» ({time.monotonic() - started:.0f} ثانیه{tries}{credit_str})."
 
-        return self.start_op(user_id, "تست ورود", run)
+        return self.start_op(user_id, "تست ورود", run, account_id=account_id)
 
-    def fetch_menu(self, user_id: int, date: str, meal: str = "") -> bool:
+    def fetch_menu(self, user_id: int, account_id: int, date: str, meal: str = "") -> bool:
         async def run(client: CullinanClient) -> str:
             found = await client.read_menu(date, meal)
+            profile = await client.read_profile()
+            if profile.get("name"):
+                with db.tx() as c:
+                    c.execute("UPDATE accounts SET display_name = ? WHERE id = ?", (profile["name"], account_id))
             with db.tx() as c:
-                row = c.execute("SELECT data FROM menus WHERE user_id = ? AND date = ?", (user_id, date)).fetchone()
-                # Fetching one meal updates that meal and keeps the others.
+                row = c.execute(
+                    "SELECT data FROM menus WHERE user_id = ? AND account_id = ? AND date = ?",
+                    (user_id, account_id, date),
+                ).fetchone()
                 menu = {**json.loads(row["data"]), **found} if row and meal else found
                 c.execute(
-                    "INSERT INTO menus (user_id, date, data, fetched_at) VALUES (?, ?, ?, ?) "
-                    "ON CONFLICT(user_id, date) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at",
-                    (user_id, date, json.dumps(menu, ensure_ascii=False), time.time()),
+                    "INSERT INTO menus (user_id, account_id, date, data, fetched_at) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(user_id, account_id, date) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at",
+                    (user_id, account_id, date, json.dumps(menu, ensure_ascii=False), time.time()),
                 )
             what = f"{meal} {date}" if meal else date
             if not any(info["foods"] for info in found.values()):
@@ -188,14 +203,23 @@ class Worker:
             note = f" رزرو فعلی تو — {'، '.join(reserved)}." if reserved else " برای این وعده‌ها رزروی نداری."
             return f"غذاهای {what} پیدا شد؛ تیک بزن و «شروع پیگیری» را بزن.{note}"
 
-        return self.start_op(user_id, "دریافت لیست غذا", run)
+        return self.start_op(user_id, "دریافت لیست غذا", run, account_id=account_id)
 
-    async def _run_user(self, user_id: int) -> None:
-        client = self.client_for(user_id)
+    async def _run_account(self, account_id: int) -> None:
+        with db.tx() as c:
+            acc = c.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        if not acc:
+            return
+        user_id = acc["user_id"]
+        client = self.client_for(account_id)
         backoff = 30
         try:
             while True:
-                jobs = _active_jobs(user_id)
+                with db.tx() as c:
+                    jobs = c.execute(
+                        "SELECT * FROM jobs WHERE account_id = ? AND status = 'active' ORDER BY id",
+                        (account_id,),
+                    ).fetchall()
                 if not jobs:
                     return
                 today = jalali.today_str()
@@ -219,12 +243,16 @@ class Worker:
                             continue
                         result = await client.attempt(job)
                         backoff = 30
-                        self._handle(user_id, row, result)
+                        # If profile name found and not saved, save it
+                        if client.display_name and not acc["display_name"]:
+                            with db.tx() as c:
+                                c.execute("UPDATE accounts SET display_name = ? WHERE id = ?", (client.display_name, account_id))
+                        self._handle(user_id, row, result, acc["display_name"] or acc["site_username"])
                     except LoginFailed as exc:
                         msg = _explain(exc)
                         for j in jobs:
                             db.set_job_status(j["id"], "failed", msg)
-                        db.log(user_id, msg, "error")
+                        db.log(user_id, f"[{acc['display_name'] or acc['site_username']}]: {msg}", "error")
                         return
                     except RateLimited as exc:
                         db.set_job_message(row["id"], "سقف درخواست ساعتی پر شد؛ صبر می‌کنم")
@@ -254,18 +282,19 @@ class Worker:
         return next((info["reserved"] for info in menu.values() if info["reserved"]), "")
 
     @staticmethod
-    def _handle(user_id: int, row, result: Attempt) -> None:
+    def _handle(user_id: int, row, result: Attempt, account_name: str = "") -> None:
         seen = "، ".join(result.seen) if result.seen else "-"
+        prefix = f"[{account_name}] " if account_name else ""
         if result.status == "bought":
             n = db.count_attempt(row["id"], result.message)
-            msg = f"{result.message} (در تلاش {n})"
+            msg = f"{prefix}{result.message} (در تلاش {n})"
             db.set_job_status(row["id"], "done", msg)
             db.log(user_id, msg, "success", row["id"])
         elif result.status == "error":
             n = db.count_attempt(row["id"], result.message)
             # The save may still have gone through; stop to avoid buying twice.
-            db.set_job_status(row["id"], "stopped", f"{result.message} (در تلاش {n}) — در سایت بررسی کن")
-            db.log(user_id, result.message, "error", row["id"])
+            db.set_job_status(row["id"], "stopped", f"{prefix}{result.message} (در تلاش {n}) — در سایت بررسی کن")
+            db.log(user_id, f"{prefix}{result.message}", "error", row["id"])
         else:
             db.count_attempt(row["id"], f"{result.message} (موجود در سبد: {seen})")
 

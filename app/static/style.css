@@ -230,3 +230,55 @@ details.manual[open] summary { margin-bottom: 10px; }
 .captcha { display: block; margin: 10px 0; min-height: 40px; padding: 6px; border-radius: 10px; background: #fff; border: 1px solid var(--line); image-rendering: pixelated; }
 
 footer { text-align: center; color: var(--muted); font-size: 12px; padding: 0 16px 24px; }
+
+/* --------------------------------------------------------- account switcher */
+.account-nav-bar {
+  margin-bottom: 20px; padding: 14px 16px; border-radius: var(--radius);
+  background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow);
+}
+.account-nav-title {
+  font-size: 13px; font-weight: 700; color: var(--muted); margin-bottom: 10px;
+}
+.account-chips {
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+}
+.acc-chip {
+  display: inline-flex; gap: 8px; align-items: center; padding: 6px 14px; border-radius: 12px;
+  background: var(--bg); border: 1.5px solid var(--line); color: var(--text);
+  text-decoration: none; font-size: 13px; transition: border-color .15s, background .15s, transform .1s;
+}
+.acc-chip:hover {
+  border-color: var(--accent); background: var(--bg-2);
+}
+.acc-chip:active { transform: translateY(1px); }
+.acc-chip.active {
+  border-color: var(--accent); background: var(--accent-soft); font-weight: 600;
+}
+.acc-avatar { font-size: 14px; }
+.acc-info { display: flex; flex-direction: column; line-height: 1.3; }
+.acc-info strong { font-size: 13px; }
+.acc-info small { font-size: 11px; color: var(--muted); }
+.acc-check { color: var(--accent); font-weight: 800; font-size: 13px; margin-right: 2px; }
+.acc-chip.new-chip {
+  border-style: dashed; color: var(--muted); font-weight: 600;
+}
+.acc-chip.new-chip:hover {
+  color: var(--accent); border-color: var(--accent);
+}
+.acc-chip.new-chip.active {
+  border-style: solid; border-color: var(--accent); color: var(--accent-text); background: var(--accent-soft);
+}
+.acc-selected-badge {
+  display: inline-block; padding: 6px 12px; margin-bottom: 12px; border-radius: 8px;
+  background: var(--bg-2); font-size: 13px; border: 1px solid var(--line);
+}
+.job-acc-chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; margin-left: 6px;
+  border-radius: 6px; background: var(--ink-soft); color: var(--ink); font-size: 12px; font-weight: 700;
+}
+.danger-btn {
+  color: var(--err) !important; border-color: color-mix(in srgb, var(--err) 40%, var(--line)) !important;
+}
+.danger-btn:hover {
+  background: var(--err-soft) !important; border-color: var(--err) !important;
+}

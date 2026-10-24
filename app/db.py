@@ -12,18 +12,22 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     created_at REAL NOT NULL
 );
--- Credentials for the university site; one per panel user.
+-- Credentials for the university site; multiple allowed per panel user.
 CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY,
-    user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     site_username TEXT NOT NULL,
-    site_password_enc TEXT NOT NULL
+    site_password_enc TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0,
+    UNIQUE (user_id, site_username)
 );
 -- A "buy from the food basket" job: keep watching one date/meal until a
 -- preferred food shows up, then buy it.
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
     date TEXT NOT NULL,            -- Jalali, e.g. 1405/08/05
     meal TEXT NOT NULL DEFAULT '', -- e.g. ناهار (matched against row dropdowns)
     foods TEXT NOT NULL,           -- one per line, highest priority first; * = anything
@@ -51,10 +55,11 @@ CREATE INDEX IF NOT EXISTS logs_user ON logs(user_id, id);
 -- Menu of a date from the weekly reservation page, read on demand so users can tick foods.
 CREATE TABLE IF NOT EXISTS menus (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL DEFAULT 0,
     date TEXT NOT NULL,
     data TEXT NOT NULL,            -- JSON: {meal: {"foods": [...], "reserved": food or "", "locked": bool}}
     fetched_at REAL NOT NULL,
-    PRIMARY KEY (user_id, date)
+    PRIMARY KEY (user_id, account_id, date)
 );
 """
 
@@ -82,15 +87,54 @@ MIGRATIONS = [
     ("jobs", "attempts", "INTEGER NOT NULL DEFAULT 0"),
     ("jobs", "last_check", "REAL NOT NULL DEFAULT 0"),
     ("jobs", "skip_if_reserved", "INTEGER NOT NULL DEFAULT 1"),
+    ("jobs", "account_id", "INTEGER REFERENCES accounts(id) ON DELETE CASCADE"),
+    ("accounts", "display_name", "TEXT NOT NULL DEFAULT ''"),
+    ("accounts", "created_at", "REAL NOT NULL DEFAULT 0"),
+    ("menus", "account_id", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
 def init() -> None:
     with tx() as c:
+        # Check if old accounts table has user_id INTEGER UNIQUE
+        acc_info = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='accounts'").fetchone()
+        if acc_info and ("user_id INTEGER UNIQUE" in acc_info[0] or "user_id INT UNIQUE" in acc_info[0]):
+            c.execute("""
+                CREATE TABLE accounts_migrated (
+                    id INTEGER PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    site_username TEXT NOT NULL,
+                    site_password_enc TEXT NOT NULL,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT 0,
+                    UNIQUE (user_id, site_username)
+                )
+            """)
+            old_cols = {r["name"] for r in c.execute("PRAGMA table_info(accounts)")}
+            if "display_name" in old_cols:
+                c.execute("""
+                    INSERT OR IGNORE INTO accounts_migrated (id, user_id, site_username, site_password_enc, display_name, created_at)
+                    SELECT id, user_id, site_username, site_password_enc, display_name, created_at FROM accounts
+                """)
+            else:
+                c.execute("""
+                    INSERT OR IGNORE INTO accounts_migrated (id, user_id, site_username, site_password_enc, display_name, created_at)
+                    SELECT id, user_id, site_username, site_password_enc, '', 0 FROM accounts
+                """)
+            c.execute("DROP TABLE accounts")
+            c.execute("ALTER TABLE accounts_migrated RENAME TO accounts")
+
         c.executescript(SCHEMA)
         for table, column, definition in MIGRATIONS:
             if column not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+        # Update existing jobs without an account_id
+        c.execute("""
+            UPDATE jobs
+            SET account_id = (SELECT id FROM accounts WHERE accounts.user_id = jobs.user_id ORDER BY id LIMIT 1)
+            WHERE account_id IS NULL OR account_id = 0
+        """)
 
 
 def count_attempt(job_id: int, message: str) -> int:

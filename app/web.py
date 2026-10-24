@@ -1,4 +1,4 @@
-"""Web panel: friends sign up, store their site login, and queue basket jobs."""
+"""Web panel: friends sign up, store their site logins, and queue basket jobs."""
 
 import json
 import logging
@@ -105,6 +105,28 @@ def logout(request: Request):
     return _back("/login")
 
 
+# ------------------------------------------------------------- accounts helper
+def _get_active_account(request: Request, accounts: list):
+    acc_param = request.query_params.get("account")
+    if acc_param == "new":
+        return None, "new"
+    if acc_param and acc_param.isdigit():
+        target_id = int(acc_param)
+        for acc in accounts:
+            if acc["id"] == target_id:
+                request.session["active_account_id"] = target_id
+                return acc, target_id
+    sess_id = request.session.get("active_account_id")
+    if sess_id:
+        for acc in accounts:
+            if acc["id"] == sess_id:
+                return acc, sess_id
+    if accounts:
+        request.session["active_account_id"] = accounts[0]["id"]
+        return accounts[0], accounts[0]["id"]
+    return None, None
+
+
 # ------------------------------------------------------------- dashboard
 @app.get("/")
 def dashboard(request: Request):
@@ -116,16 +138,33 @@ def dashboard(request: Request):
         if not user:
             request.session.clear()
             return _back("/login")
-        account = c.execute("SELECT site_username FROM accounts WHERE user_id = ?", (uid,)).fetchone()
-        jobs = c.execute("SELECT * FROM jobs WHERE user_id = ? ORDER BY id DESC LIMIT 50", (uid,)).fetchall()
+        accounts = c.execute(
+            "SELECT id, site_username, display_name, created_at FROM accounts WHERE user_id = ? ORDER BY id",
+            (uid,),
+        ).fetchall()
+        active_account, active_id = _get_active_account(request, accounts)
+        jobs = c.execute(
+            "SELECT j.*, a.display_name AS account_name, a.site_username "
+            "FROM jobs j LEFT JOIN accounts a ON a.id = j.account_id "
+            "WHERE j.user_id = ? ORDER BY j.id DESC LIMIT 50", (uid,)
+        ).fetchall()
         logs = c.execute("SELECT * FROM logs WHERE user_id = ? ORDER BY id DESC LIMIT 40", (uid,)).fetchall()
+        target_aid = active_account["id"] if active_account else 0
         menu_row = c.execute(
-            "SELECT * FROM menus WHERE user_id = ? AND date >= ? ORDER BY fetched_at DESC LIMIT 1",
-            (uid, jalali.today_str()),
+            "SELECT * FROM menus WHERE user_id = ? AND account_id = ? AND date >= ? ORDER BY fetched_at DESC LIMIT 1",
+            (uid, target_aid, jalali.today_str()),
         ).fetchone()
+        if not menu_row and active_account:
+            # Fallback to any recent menu for this user
+            menu_row = c.execute(
+                "SELECT * FROM menus WHERE user_id = ? AND date >= ? ORDER BY fetched_at DESC LIMIT 1",
+                (uid, jalali.today_str()),
+            ).fetchone()
     menu = json.loads(menu_row["data"]) if menu_row else None
     return _render(
-        request, "dashboard.html", user=user, account=account, jobs=jobs, logs=logs,
+        request, "dashboard.html", user=user, accounts=accounts,
+        active_account=active_account, active_id=active_id,
+        jobs=jobs, logs=logs,
         today=jalali.today_str(), captcha_pending=captcha.manual.pending(uid),
         poll_seconds=config.POLL_SECONDS, max_per_hour=config.MAX_REQUESTS_PER_HOUR,
         op=worker.ops.get(uid), now=time.time(),
@@ -134,79 +173,165 @@ def dashboard(request: Request):
     )
 
 
-def _save_account(uid: int, site_username: str, site_password: str) -> bool:
-    """Store the site login. An empty password keeps the saved one. False if there is none to keep."""
+@app.post("/account")
+def save_account(
+    request: Request,
+    site_username: str = Form(...),
+    site_password: str = Form(""),
+    display_name: str = Form(""),
+    account_id: int = Form(0),
+):
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    username = norm(site_username).strip()
+    if not username:
+        return _back("/", "شماره دانشجویی را وارد کن.", request)
+
     with db.tx() as c:
-        if site_password:
-            c.execute(
-                "INSERT INTO accounts (user_id, site_username, site_password_enc) VALUES (?, ?, ?) "
-                "ON CONFLICT(user_id) DO UPDATE SET site_username = excluded.site_username, "
-                "site_password_enc = excluded.site_password_enc",
-                (uid, norm(site_username), security.encrypt(site_password)),
-            )
-        elif not c.execute(
-            "UPDATE accounts SET site_username = ? WHERE user_id = ?", (norm(site_username), uid)
-        ).rowcount:
-            return False
-    task = worker.tasks.pop(uid, None)  # restart with the new credentials
+        if account_id > 0:
+            acc = c.execute("SELECT * FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
+            if not acc:
+                return _back("/", "حساب پیدا نشد.", request)
+            new_name = display_name.strip() or acc["display_name"]
+            if site_password.strip():
+                c.execute(
+                    "UPDATE accounts SET site_username = ?, site_password_enc = ?, display_name = ? WHERE id = ?",
+                    (username, security.encrypt(site_password.strip()), new_name, account_id)
+                )
+                flash = "اطلاعات حساب و رمز جدید ذخیره شد."
+            else:
+                c.execute(
+                    "UPDATE accounts SET site_username = ?, display_name = ? WHERE id = ?",
+                    (username, new_name, account_id)
+                )
+                flash = "اطلاعات حساب ذخیره شد (رمز قبلی حفظ شد)."
+            saved_id = account_id
+        else:
+            if not site_password.strip():
+                return _back("/?account=new", "برای حساب جدید، رمز سامانهٔ سلف الزامی است.", request)
+            existing = c.execute(
+                "SELECT id, display_name FROM accounts WHERE user_id = ? AND site_username = ?",
+                (uid, username)
+            ).fetchone()
+            if existing:
+                c.execute(
+                    "UPDATE accounts SET site_password_enc = ?, display_name = ? WHERE id = ?",
+                    (security.encrypt(site_password.strip()), display_name.strip() or existing["display_name"], existing["id"])
+                )
+                saved_id = existing["id"]
+                flash = "رمز این حساب بروزرسانی شد."
+            else:
+                cur = c.execute(
+                    "INSERT INTO accounts (user_id, site_username, site_password_enc, display_name, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (uid, username, security.encrypt(site_password.strip()), display_name.strip(), time.time())
+                )
+                saved_id = cur.lastrowid
+                flash = "حساب جدید اضافه شد. با زدن «تست ورود»، نام دانشجو خودکار دریافت و ثبت می‌شود."
+
+    request.session["active_account_id"] = saved_id
+    task = worker.tasks.pop(saved_id, None)
     if task:
         task.cancel()
-    return True
+    return _back(f"/?account={saved_id}", flash, request)
 
 
-def _has_account(uid: int) -> bool:
-    with db.tx() as c:
-        return c.execute("SELECT 1 FROM accounts WHERE user_id = ?", (uid,)).fetchone() is not None
-
-
-@app.post("/account")
-def save_account(request: Request, site_username: str = Form(...), site_password: str = Form("")):
-    uid = _uid(request)
-    if not uid:
-        return _back("/login")
-    if not site_username.strip() or not _save_account(uid, site_username, site_password):
-        return _back("/", "شماره دانشجویی و رمز سامانه را وارد کن.", request)
-    if site_password:
-        return _back("/", "شماره دانشجویی و رمز ذخیره شد (رمزنگاری‌شده).", request)
-    return _back("/", "شماره دانشجویی ذخیره شد؛ رمز قبلی سر جایش ماند.", request)
-
-
-# The two endpoints below start asyncio tasks, so they must run on the event loop (async def).
 @app.post("/account/test")
-async def test_account(request: Request, site_username: str = Form(""), site_password: str = Form("")):
+async def test_account(
+    request: Request,
+    account_id: int = Form(0),
+    site_username: str = Form(""),
+    site_password: str = Form(""),
+):
     uid = _uid(request)
     if not uid:
         return _back("/login")
-    # Typed new details and pressed "test": save them first so the test uses them.
-    if site_username.strip():
-        _save_account(uid, site_username, site_password)
-    if not _has_account(uid):
-        return _back("/", "اول شماره دانشجویی و رمز سامانه را وارد کن.", request)
-    # Runs in the background: it may wait for a manual captcha from this page.
-    if not worker.test_login(uid):
-        return _back("/", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
-    return _back("/")
+    with db.tx() as c:
+        if account_id > 0:
+            acc = c.execute("SELECT * FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
+        else:
+            acc = c.execute("SELECT * FROM accounts WHERE user_id = ? ORDER BY id LIMIT 1", (uid,)).fetchone()
+            if acc:
+                account_id = acc["id"]
+    if not acc:
+        return _back("/", "اول اطلاعات ورود یک حساب سلف را ذخیره کن.", request)
+
+    if site_username.strip() or site_password.strip():
+        with db.tx() as c:
+            new_u = norm(site_username).strip() or acc["site_username"]
+            if site_password.strip():
+                c.execute(
+                    "UPDATE accounts SET site_username = ?, site_password_enc = ? WHERE id = ?",
+                    (new_u, security.encrypt(site_password.strip()), account_id)
+                )
+            else:
+                c.execute("UPDATE accounts SET site_username = ? WHERE id = ?", (new_u, account_id))
+
+    request.session["active_account_id"] = account_id
+    if not worker.test_login(uid, account_id):
+        return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+    return _back(f"/?account={account_id}")
+
+
+@app.post("/account/delete")
+def delete_account(request: Request, account_id: int = Form(...)):
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    with db.tx() as c:
+        acc = c.execute(
+            "SELECT display_name, site_username FROM accounts WHERE id = ? AND user_id = ?",
+            (account_id, uid)
+        ).fetchone()
+        if not acc:
+            return _back("/", "حساب پیدا نشد.", request)
+        name = acc["display_name"] or acc["site_username"]
+        c.execute(
+            "UPDATE jobs SET status = 'stopped', message = 'حساب سلف حذف شد' WHERE account_id = ? AND status = 'active'",
+            (account_id,)
+        )
+        c.execute("DELETE FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid))
+    task = worker.tasks.pop(account_id, None)
+    if task:
+        task.cancel()
+    request.session.pop("active_account_id", None)
+    return _back("/", f"حساب «{name}» حذف شد.", request)
 
 
 @app.post("/menu")
-async def fetch_menu(request: Request, date: str = Form(...), meal: str = Form("")):
+async def fetch_menu(
+    request: Request,
+    date: str = Form(...),
+    meal: str = Form(""),
+    account_id: int = Form(0),
+):
     uid = _uid(request)
     if not uid:
         return _back("/login")
     day = jalali.normalize_date(date)
     if not day:
         return _back("/", "تاریخ را به شکل ۱۴۰۵/۰۸/۰۵ وارد کن", request)
-    if not _has_account(uid):
+
+    with db.tx() as c:
+        if account_id > 0:
+            acc = c.execute("SELECT id FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
+        else:
+            acc = c.execute("SELECT id FROM accounts WHERE user_id = ? ORDER BY id LIMIT 1", (uid,)).fetchone()
+            if acc:
+                account_id = acc["id"]
+    if not acc:
         return _back("/", "اول اطلاعات ورود سامانه را ذخیره کن", request)
-    if not worker.fetch_menu(uid, day, meal if meal in MEALS else ""):
-        return _back("/", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
-    return _back("/")
+
+    if not worker.fetch_menu(uid, account_id, day, meal if meal in MEALS else ""):
+        return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+    return _back(f"/?account={account_id}")
 
 
 def _picked_foods(uid: int, menu_date: str, picks: list[str]) -> dict[str, list[str]]:
     """Map ticked "meal_index:food_index" boxes back to {meal: [food, ...]}."""
     with db.tx() as c:
-        row = c.execute("SELECT data FROM menus WHERE user_id = ? AND date = ?", (uid, menu_date)).fetchone()
+        row = c.execute("SELECT data FROM menus WHERE user_id = ? AND date = ? ORDER BY fetched_at DESC LIMIT 1", (uid, menu_date)).fetchone()
     if not row:
         return {}
     meals = list(json.loads(row["data"]).items())
@@ -234,34 +359,45 @@ def create_job(
     skip_if_reserved: str = Form(""),
     menu_date: str = Form(""),
     picks: list[str] = Form([]),
+    account_id: int = Form(0),
 ):
     uid = _uid(request)
     if not uid:
         return _back("/login")
+
+    with db.tx() as c:
+        if account_id > 0:
+            acc = c.execute("SELECT id, display_name, site_username FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
+        else:
+            acc = c.execute("SELECT id, display_name, site_username FROM accounts WHERE user_id = ? ORDER BY id LIMIT 1", (uid,)).fetchone()
+            if acc:
+                account_id = acc["id"]
+    if not acc:
+        return _back("/", "اول اطلاعات ورود سامانه را ذخیره کن", request)
+
     if picks and menu_date:
         day = menu_date
-        # One job per meal, with the ticked foods in menu order.
         wanted = [(m, "\n".join(f)) for m, f in _picked_foods(uid, menu_date, picks).items()]
     else:
         day = jalali.normalize_date(date)
         wanted = [(meal if meal in MEALS else "", foods.strip())] if parse_foods(foods) else []
     if not day:
-        return _back("/", "تاریخ را به شکل ۱۴۰۵/۰۸/۰۵ وارد کن", request)
+        return _back(f"/?account={account_id}", "تاریخ را به شکل ۱۴۰۵/۰۸/۰۵ وارد کن", request)
     if not wanted:
-        return _back("/", "حداقل یک غذا تیک بزن یا بنویس (یا * برای هر غذایی)", request)
-    if not _has_account(uid):
-        return _back("/", "اول اطلاعات ورود سامانه را ذخیره کن", request)
+        return _back(f"/?account={account_id}", "حداقل یک غذا تیک بزن یا بنویس (یا * برای هر غذایی)", request)
+
+    acc_name = acc["display_name"] or acc["site_username"]
     with db.tx() as c:
         now = time.time()
         for job_meal, job_foods in wanted:
             c.execute(
-                "INSERT INTO jobs (user_id, date, meal, foods, quantity, active_from, active_to, poll_seconds, "
-                "skip_if_reserved, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (uid, day, job_meal, job_foods, max(1, min(quantity, 5)), active_from, active_to,
+                "INSERT INTO jobs (user_id, account_id, date, meal, foods, quantity, active_from, active_to, poll_seconds, "
+                "skip_if_reserved, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (uid, account_id, day, job_meal, job_foods, max(1, min(quantity, 5)), active_from, active_to,
                  _poll_seconds(poll_seconds), 1 if skip_if_reserved else 0, now, now),
             )
-    label = "کار جدید اضافه شد" if len(wanted) == 1 else f"{len(wanted)} کار جدید (یکی برای هر وعده) اضافه شد"
-    return _back("/", f"{label}؛ ربات شروع به پیگیری سبد می‌کند.", request)
+    label = f"کار جدید برای «{acc_name}» اضافه شد" if len(wanted) == 1 else f"{len(wanted)} کار جدید برای «{acc_name}» اضافه شد"
+    return _back(f"/?account={account_id}", f"{label}؛ ربات شروع به پیگیری سبد می‌کند.", request)
 
 
 def _poll_seconds(value: float) -> float:
