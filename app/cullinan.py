@@ -8,6 +8,7 @@ after looking at a page dump (see tools/dump_pages.py).
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 from urllib.parse import urljoin
@@ -34,6 +35,7 @@ SEL = {
 # Dropdown entries that mean "nothing selected".
 PLACEHOLDERS = {"", "-", "--", "0", "انتخاب", "انتخاب کنید", "---"}
 MEAL_NAMES = ("صبحانه", "ناهار", "شام", "سحری", "افطار")
+LONG_REQUEST = 2.5  # seconds; see _postback
 WRONG_PASSWORD_HINTS = ("رمز", "کلمه عبور", "نام کاربری")
 ERROR_HINTS = ("خطا", "ناموفق", "کافی نیست", "موجود نیست", "امکان", "مجاز نیست", "error")
 
@@ -148,6 +150,7 @@ class CullinanClient:
         # On-demand runs (login test, menu fetch) a user is waiting for: space
         # requests by STEP_SECONDS only, instead of the full polling interval.
         self.interactive = False
+        self.captcha_attempts = 0  # of the last successful login, for the login test report
 
     async def _page(self) -> Page:
         if self.page is None or self.page.is_closed():
@@ -179,10 +182,13 @@ class CullinanClient:
         self.context = self.page = None
 
     async def _settle(self, page: Page) -> None:
-        try:
-            await page.wait_for_load_state("networkidle", timeout=10_000)
-        except Exception:
-            pass
+        # Pages are server-rendered, so "load" is enough; "network idle" is only a
+        # short best effort because some pages keep a request open (polling).
+        for state, timeout in (("load", 15_000), ("networkidle", 2_000)):
+            try:
+                await page.wait_for_load_state(state, timeout=timeout)
+            except Exception:
+                pass
 
     async def _postback(self, page: Page, action: Callable[[], Awaitable]) -> None:
         """Run an action that may post back, and wait until the page is stable.
@@ -190,15 +196,20 @@ class CullinanClient:
         Handles both full-page postbacks (the old document is replaced) and
         UpdatePanel/AJAX postbacks (no navigation, just XHR traffic).
         """
-        pending: set = set()
+        pending: dict = {}  # request -> start time
         kinds = ("document", "xhr", "fetch", "script")
 
         def on_request(req):
             if req.resource_type in kinds:
-                pending.add(req)
+                pending[req] = time.monotonic()
 
         def on_done(req):
-            pending.discard(req)
+            pending.pop(req, None)
+
+        def busy_requests() -> bool:
+            # A request open for longer than LONG_REQUEST is a long poll, not our postback.
+            now = time.monotonic()
+            return any(now - started < LONG_REQUEST for started in pending.values())
 
         page.on("request", on_request)
         page.on("requestfinished", on_done)
@@ -219,7 +230,7 @@ class CullinanClient:
                 except Exception:  # navigating right now
                     quiet = 0
                     continue
-                quiet = quiet + 1 if not busy and not pending else 0
+                quiet = quiet + 1 if not busy and not busy_requests() else 0
                 if quiet >= 2:
                     break
         finally:
@@ -247,14 +258,18 @@ class CullinanClient:
     # ---------------------------------------------------------------- login
     async def login(self) -> None:
         self.throttle.login_attempt()
+        started = time.monotonic()
         page = await self._goto(config.SITE_URL)
+        log.info("login page loaded in %.1fs", time.monotonic() - started)
         if not await self._on_login_page(page):
             return
         for attempt in range(1, config.CAPTCHA_OCR_TRIES + 2):
             await self._fill(page, SEL["username"], self.username)
             await self._fill(page, SEL["password"], self.password)
             png = await page.locator(SEL["captcha_img"]).first.screenshot()
+            t = time.monotonic()
             code = await self.solve_captcha(png, attempt)
+            log.info("captcha attempt %d: %s in %.1fs", attempt, "read" if code else "unreadable", time.monotonic() - t)
             if not code:
                 if attempt > config.CAPTCHA_OCR_TRIES:
                     break
@@ -262,9 +277,12 @@ class CullinanClient:
                 continue
             await self._fill(page, SEL["captcha_input"], code)
             await self.throttle.wait(step=True)
+            t = time.monotonic()
             await self._postback(page, page.locator(SEL["login_button"]).first.click)
+            log.info("login postback took %.1fs", time.monotonic() - t)
             if not await self._on_login_page(page):
-                log.info("logged in as %s", self.username)
+                self.captcha_attempts = attempt
+                log.info("logged in as %s in %.1fs (captcha attempt %d)", self.username, time.monotonic() - started, attempt)
                 return
             error = norm(await self._text(page, SEL["login_error"]) + " " + " ".join(self.dialogs[-1:]))
             if any(h in error for h in WRONG_PASSWORD_HINTS) and "امنیتی" not in error and "تصویر" not in error:
@@ -362,7 +380,9 @@ class CullinanClient:
         """Log in and make sure the basket page opens (used by the login test)."""
         url = urljoin(config.SITE_URL, config.BASKET_PATH)
         await self.login()
+        started = time.monotonic()
         page = await self._goto(url, step=True)
+        log.info("basket page loaded in %.1fs", time.monotonic() - started)
         if await self._on_login_page(page):
             raise SiteError("ورود انجام شد ولی صفحهٔ سبد غذایی باز نشد")
 

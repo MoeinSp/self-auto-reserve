@@ -161,7 +161,8 @@ class Worker:
         async def run(client: CullinanClient) -> str:
             started = time.monotonic()
             await client.check_basket()
-            return f"ورود موفق بود و صفحهٔ سبد غذایی باز شد ({time.monotonic() - started:.0f} ثانیه)."
+            tries = f"، کپچا در تلاش {client.captcha_attempts} حل شد" if client.captcha_attempts > 1 else ""
+            return f"ورود موفق بود و صفحهٔ سبد غذایی باز شد ({time.monotonic() - started:.0f} ثانیه{tries})."
 
         return self.start_op(user_id, "تست ورود", run)
 

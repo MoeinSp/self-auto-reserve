@@ -100,7 +100,7 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         started = time.monotonic()
         await c.check_basket()
         await c.close()
-        self.assertLess(time.monotonic() - started, 20)
+        self.assertLess(time.monotonic() - started, 15)
 
     async def test_wrong_password_stops(self):
         c = self.client(password="bad")

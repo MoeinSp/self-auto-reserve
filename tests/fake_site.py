@@ -3,6 +3,7 @@
 It mimics what matters: a captcha login, a date box with AutoPostBack, and a
 grid whose dropdowns post back the whole form (like ASP.NET WebForms).
 """
+import asyncio
 import html
 
 from fastapi import FastAPI, Request
@@ -18,6 +19,16 @@ state = {"basket_loads": 0}
 
 app = FastAPI()
 
+# Logged-in pages keep a request open (like the real site), so "wait until the
+# network is quiet" must not wait for it.
+LONG_POLL = "<script>fetch('/poll')</script>"
+
+
+@app.get("/poll")
+async def poll():
+    await asyncio.sleep(25)
+    return {}
+
 
 def _opts(values, selected):
     return "".join(
@@ -29,7 +40,7 @@ def _opts(values, selected):
 @app.get("/")
 def login_page(request: Request, error: str = ""):
     if request.cookies.get("auth") == "ok":
-        return HTMLResponse("<html><body>داشبورد</body></html>")
+        return HTMLResponse(f"<html><body>داشبورد{LONG_POLL}</body></html>")
     msg = f'<span id="lblMessage">{error}</span>' if error else ""
     # Like the real site: inputs are readonly until focused, and the news box
     # embeds images from another host (which the bot should not wait for).
@@ -97,4 +108,4 @@ async def basket(request: Request):
     return HTMLResponse(f"""<html><body><form method="post">
       <input type="text" id="txtDate" name="txtDate" value="{date}" onchange="this.form.submit()">
       <table><tr><th>رزرو</th><th>وعده</th><th>غذا</th><th>تعداد</th><th>کالری</th><th>مبلغ خرید</th><th>وضعیت</th></tr>{rows}</table>
-      <input type="submit" name="btnSave" value="ذخیره"></form>{script}</body></html>""")
+      <input type="submit" name="btnSave" value="ذخیره"></form>{script}{LONG_POLL}</body></html>""")
