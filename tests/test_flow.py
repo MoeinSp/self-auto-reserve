@@ -379,8 +379,8 @@ class UnitTest(unittest.TestCase):
 
             row1 = c.execute("SELECT data FROM menus WHERE user_id = 1 AND account_id = 1 AND date = '1405/08/02'").fetchone()
             row2 = c.execute("SELECT data FROM menus WHERE user_id = 1 AND account_id = 2 AND date = '1405/08/02'").fetchone()
-            self.assertIn("قیمه", row1["data"])
-            self.assertIn("قورمه سبزی", row2["data"])
+            self.assertIn("قیمه", json.loads(row1["data"])["ناهار"]["foods"])
+            self.assertIn("قورمه سبزی", json.loads(row2["data"])["ناهار"]["foods"])
 
 
 if __name__ == "__main__":
