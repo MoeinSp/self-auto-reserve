@@ -300,14 +300,21 @@ class Worker:
             data = await client.create_payment_session(amount_rials, bank_idx)
             import secrets
             token = secrets.token_urlsafe(16)
+            import json
+            now_ts = time.time()
             PAYMENT_SESSIONS[token] = {
                 "action": data["action"],
                 "method": data.get("method", "POST"),
                 "fields": data.get("fields", {}),
                 "bank": data.get("bank", "درگاه پرداخت"),
                 "amount_rials": amount_rials,
-                "created_at": time.time(),
+                "created_at": now_ts,
             }
+            with db.tx() as c:
+                c.execute(
+                    "INSERT OR REPLACE INTO payment_sessions (token, action, method, fields, bank, amount_rials, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (token, data["action"], data.get("method", "POST"), json.dumps(data.get("fields", {})), data.get("bank", "درگاه پرداخت"), amount_rials, now_ts)
+                )
             gateway_url = f"/pay/gateway/{token}"
             db.log(user_id, f"💳 لینک درگاه {data.get('bank')} برای مبلغ {amount_rials:,} ریال ایجاد شد.", "info")
             return f"PAYMENT_READY:{gateway_url}:{data.get('bank')}:{amount_rials}"

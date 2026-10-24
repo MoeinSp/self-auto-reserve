@@ -476,6 +476,18 @@ async def request_pay(
 @app.get("/pay/gateway/{token}", response_class=HTMLResponse)
 def gateway_redirect(token: str):
     sess = PAYMENT_SESSIONS.get(token) or getattr(worker, "PAYMENT_SESSIONS", {}).get(token)
+    if not sess:
+        with db.tx() as c:
+            row = c.execute("SELECT * FROM payment_sessions WHERE token = ?", (token,)).fetchone()
+            if row:
+                sess = {
+                    "action": row["action"],
+                    "method": row["method"],
+                    "fields": json.loads(row["fields"]) if row["fields"] else {},
+                    "bank": row["bank"],
+                    "amount_rials": row["amount_rials"],
+                    "created_at": row["created_at"],
+                }
     if not sess or (time.time() - sess.get("created_at", 0) > 1800):
         return HTMLResponse(
             """<!DOCTYPE html><html dir="rtl" lang="fa"><head><meta charset="utf-8">

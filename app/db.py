@@ -67,6 +67,15 @@ CREATE TABLE IF NOT EXISTS menus (
     fetched_at REAL NOT NULL,
     PRIMARY KEY (user_id, account_id, date)
 );
+CREATE TABLE IF NOT EXISTS payment_sessions (
+    token TEXT PRIMARY KEY,
+    action TEXT NOT NULL,
+    method TEXT NOT NULL,
+    fields TEXT NOT NULL,
+    bank TEXT NOT NULL,
+    amount_rials INTEGER NOT NULL,
+    created_at REAL NOT NULL
+);
 """
 
 
