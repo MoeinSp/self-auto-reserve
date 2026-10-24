@@ -50,9 +50,19 @@
         <div class="payment-callout-text">
           درگاه بانکی <strong>{{ pparts[2] }}</strong> آماده پرداخت شد (مبلغ: <strong>{{ '{:,}'.format(pparts[3]|int) }} ریال</strong>):
         </div>
-        <a href="{{ pparts[1] }}" target="_blank" rel="noopener noreferrer" class="direct-pay-link">
-          🚀 ورود مستقیم به درگاه پرداخت شاپرک ({{ pparts[2] }}) ↗
-        </a>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <a href="{{ pparts[1] }}" target="_blank" rel="noopener noreferrer" class="direct-pay-link">
+            🚀 ورود مستقیم به درگاه پرداخت شاپرک ({{ pparts[2] }}) ↗
+          </a>
+          {% if active_account %}
+          <form method="post" action="/account/sync-credit" style="display:inline;margin:0">
+            <input type="hidden" name="account_id" value="{{ active_account.id }}">
+            <button type="submit" class="secondary" style="padding:10px 16px;border-radius:10px;font-size:13px;cursor:pointer">
+              🔄 بررسی افزایش موجودی پس از پرداخت
+            </button>
+          </form>
+          {% endif %}
+        </div>
       </div>
     {% else %}
       <div>{{ op.message }}</div>
