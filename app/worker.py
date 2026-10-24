@@ -1,12 +1,15 @@
 """Background loop: one task per user that has active jobs."""
 import asyncio
 import datetime as dt
+import json
 import logging
+import time
+from typing import Awaitable, Callable
 
 from playwright.async_api import async_playwright
 
 from . import captcha, db, jalali, security
-from .cullinan import Attempt, CullinanClient, Job, LoginFailed, launch_browser
+from .cullinan import Attempt, CullinanClient, Job, LoginFailed, SiteError, launch_browser
 from .ratelimit import RateLimited, Throttle
 from .text import parse_foods
 
@@ -33,10 +36,31 @@ def _active_jobs(user_id: int) -> list:
         ).fetchall()
 
 
+OP_TIMEOUT = 600  # covers a manual captcha wait (CAPTCHA_MANUAL_TIMEOUT)
+
+
+def _explain(exc: Exception) -> str:
+    """Turn an error from the site into advice the user can act on."""
+    if isinstance(exc, LoginFailed):
+        return f"شماره دانشجویی یا رمز سامانه اشتباه است ({exc}). اطلاعات را اصلاح و دوباره ذخیره کن."
+    if isinstance(exc, RateLimited):
+        return f"سقف تلاش ساعتی برای محافظت از حساب پر شده؛ حدود {int(exc.retry_after // 60) + 1} دقیقه دیگر دوباره امتحان کن."
+    if isinstance(exc, asyncio.TimeoutError):
+        return "زمان تمام شد (کپچا وارد نشد یا سایت جواب نداد)."
+    if isinstance(exc, SiteError):
+        return str(exc)
+    text = str(exc)
+    if "net::" in text or "Timeout" in text:
+        return "سایت دانشگاه در دسترس نیست یا خیلی کند جواب می‌دهد؛ کمی بعد دوباره امتحان کن."
+    return f"خطای غیرمنتظره: {text[:200]}"
+
+
 class Worker:
     def __init__(self):
         self.tasks: dict[int, asyncio.Task] = {}
         self.throttles: dict[int, Throttle] = {}
+        # One on-demand operation (login test / menu fetch) per user, shown on the dashboard.
+        self.ops: dict[int, dict] = {}
         self._pw = None
         self.browser = None
 
@@ -96,13 +120,57 @@ class Worker:
             self.throttle(user_id), solve,
         )
 
-    async def test_login(self, user_id: int) -> str:
-        client = self.client_for(user_id)
-        try:
-            await client.login()
-            return "ورود موفق بود ✅"
-        finally:
-            await client.close()
+    def busy(self, user_id: int) -> bool:
+        op = self.ops.get(user_id)
+        return bool(op and op["state"] == "running")
+
+    def start_op(self, user_id: int, title: str, run: Callable[[CullinanClient], Awaitable[str]]) -> bool:
+        """Run `run` in the background with its own browser session; False if one is already running."""
+        if self.busy(user_id):
+            return False
+        op = self.ops[user_id] = {"title": title, "state": "running", "message": "", "started": time.time()}
+
+        async def go():
+            client = self.client_for(user_id)
+            try:
+                op["message"] = await asyncio.wait_for(run(client), OP_TIMEOUT)
+                op["state"] = "ok"
+                db.log(user_id, f"{title}: {op['message']}", "success")
+            except Exception as exc:
+                if not isinstance(exc, (LoginFailed, RateLimited, SiteError, asyncio.TimeoutError)):
+                    log.exception("%s failed for user %s", title, user_id)
+                op["state"], op["message"] = "error", _explain(exc)
+                db.log(user_id, f"{title} ناموفق: {op['message']}", "error")
+            finally:
+                op["finished"] = time.time()
+                await client.close()
+
+        asyncio.create_task(go())
+        return True
+
+    def test_login(self, user_id: int) -> bool:
+        async def run(client: CullinanClient) -> str:
+            started = time.monotonic()
+            await client.check_basket()
+            return f"ورود موفق بود و صفحهٔ سبد غذایی باز شد ({time.monotonic() - started:.0f} ثانیه)."
+
+        return self.start_op(user_id, "تست ورود", run)
+
+    def fetch_menu(self, user_id: int, date: str) -> bool:
+        async def run(client: CullinanClient) -> str:
+            menu = await client.read_menu(date)
+            with db.tx() as c:
+                c.execute(
+                    "INSERT INTO menus (user_id, date, data, fetched_at) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(user_id, date) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at",
+                    (user_id, date, json.dumps(menu, ensure_ascii=False), time.time()),
+                )
+            total = sum(len(foods) for foods in menu.values())
+            if not total:
+                return f"برای {date} فعلاً غذایی در سبد نیست."
+            return f"لیست غذای {date} گرفته شد ({total} غذا)."
+
+        return self.start_op(user_id, "دریافت لیست غذا", run)
 
     async def _run_user(self, user_id: int) -> None:
         client = self.client_for(user_id)

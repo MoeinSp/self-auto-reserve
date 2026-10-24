@@ -1,14 +1,30 @@
 {% extends "base.html" %}
+{% block head %}
+{% if op and op.state == 'running' %}
+<script>
+  // Refresh until the background operation finishes, but never while the user is typing.
+  setTimeout(function check() {
+    var el = document.activeElement;
+    if (el && /INPUT|TEXTAREA|SELECT/.test(el.tagName)) return setTimeout(check, 3000);
+    location.reload();
+  }, 4000);
+</script>
+{% endif %}
+{% endblock %}
 {% block header_extra %}
-<span class="muted">{{ user.username }} · امروز {{ today }}</span>
-<form method="post" action="/logout"><button class="link">خروج</button></form>
+<div class="user-chip">
+  <span class="muted">امروز {{ today }}</span>
+  <span class="avatar">{{ user.username[:1]|upper }}</span>
+  <span>{{ user.username }}</span>
+  <form method="post" action="/logout"><button class="link">خروج</button></form>
+</div>
 {% endblock %}
 {% block content %}
 
 {% if captcha_pending %}
 <section class="card warn">
-  <h2>کپچا را وارد کن</h2>
-  <p>ربات نتوانست کد امنیتی را بخواند.</p>
+  <div class="card-head"><span class="step">!</span><h2>کپچا را وارد کن</h2></div>
+  <p class="muted">ربات نتوانست کد امنیتی را بخواند؛ عدد داخل تصویر را بنویس.</p>
   <img src="/captcha.png?{{ range(100000)|random }}" alt="کپچا" class="captcha">
   <form method="post" action="/captcha" class="row">
     <input name="code" inputmode="numeric" autocomplete="off" required autofocus>
@@ -17,71 +33,132 @@
 </section>
 {% endif %}
 
+{% if op and (op.state == 'running' or now - op.finished < 900) %}
+<section class="card op {{ op.state }}" role="status">
+  <div class="op-icon">{% if op.state == 'running' %}<span class="spinner"></span>{% elif op.state == 'ok' %}✓{% else %}✕{% endif %}</div>
+  <div>
+    <b>{{ op.title }}</b>
+    {% if op.state == 'running' %}
+      <div class="muted">در حال انجام… (از {{ (now - op.started)|int }} ثانیه پیش) — اگر کپچا لازم شد، همین‌جا نشان داده می‌شود.</div>
+    {% else %}
+      <div>{{ op.message }}</div>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
+{% set active = jobs|selectattr('status', 'equalto', 'active')|list|length %}
+{% set done = jobs|selectattr('status', 'equalto', 'done')|list|length %}
+<div class="stats">
+  <div class="stat active"><b>{{ active }}</b><span>در حال پیگیری</span></div>
+  <div class="stat ok"><b>{{ done }}</b><span>خریداری‌شده</span></div>
+  <div class="stat account"><b>{{ account.site_username if account else 'ثبت نشده' }}</b><span>حساب سامانهٔ سلف</span></div>
+</div>
+
 <div class="grid2">
   <section class="card">
-    <h2>اطلاعات ورود سامانهٔ سلف</h2>
-    {% if account %}<p class="muted">ذخیره شده برای <b>{{ account.site_username }}</b>. برای تغییر دوباره وارد کن.</p>{% endif %}
+    <div class="card-head"><span class="step">۱</span><h2>اطلاعات ورود سامانهٔ سلف</h2></div>
+    {% if account %}<div class="saved">ذخیره شده برای&nbsp;<b>{{ account.site_username }}</b>. برای تغییر دوباره وارد کن.</div>{% endif %}
     <form method="post" action="/account">
-      <label>شماره دانشجویی <input name="site_username" required value="{{ account.site_username if account else '' }}"></label>
+      <label>شماره دانشجویی <input name="site_username" required inputmode="numeric" value="{{ account.site_username if account else '' }}"></label>
       <label>رمز سامانه <input name="site_password" type="password" required autocomplete="off"></label>
-      <button>ذخیره</button>
+      <div class="btns">
+        <button>ذخیره</button>
+        <button class="secondary" formaction="/account/test" formnovalidate {% if op and op.state == 'running' %}disabled{% endif %}>
+          {% if account %}تست ورود{% else %}ذخیره و تست ورود{% endif %}
+        </button>
+      </div>
+      <p class="note">«تست ورود» با کپچا وارد سامانه می‌شود و باز شدن صفحهٔ سبد غذایی را هم چک می‌کند. اگر رمز جدید نوشته باشی، اول ذخیره‌اش می‌کند.</p>
     </form>
-    {% if account %}
-    <form method="post" action="/account/test"><button class="secondary">تست ورود</button></form>
-    {% endif %}
   </section>
 
   <section class="card">
-    <h2>خرید خودکار از سبد غذایی</h2>
+    <div class="card-head"><span class="step">۲</span><h2>خرید خودکار از سبد غذایی</h2></div>
     <form method="post" action="/jobs">
       <div class="row">
-        <label>تاریخ <input name="date" value="{{ today }}" required placeholder="1405/08/05"></label>
+        <label>تاریخ <input name="date" value="{{ menu_date or today }}" required placeholder="1405/08/05" dir="ltr"></label>
+        <button class="secondary" formaction="/menu" formnovalidate {% if op and op.state == 'running' %}disabled{% endif %}>دریافت لیست غذا</button>
+      </div>
+
+      {% if menu %}
+      <input type="hidden" name="menu_date" value="{{ menu_date }}">
+      <div class="menu-head">غذاهای <b dir="ltr">{{ menu_date }}</b> <span class="muted small">· به‌روز شده {{ menu_at|ts }}</span></div>
+      <div class="menu">
+        {% for meal, foods in menu.items() %}{% set mi = loop.index0 %}
+        <fieldset class="meal">
+          <legend>{{ meal or 'غذاها' }}</legend>
+          {% for f in foods %}
+          <label class="pick"><input type="checkbox" name="picks" value="{{ mi }}:{{ loop.index0 }}"><span>{{ f }}</span></label>
+          {% else %}
+          <p class="muted small">فعلاً غذایی نیست</p>
+          {% endfor %}
+        </fieldset>
+        {% endfor %}
+      </div>
+      <p class="muted small">هر وعده‌ای که تیک بزنی یک کار جدا می‌شود. اگر در یک وعده چند غذا تیک بزنی، هر کدام زودتر موجود شود خریده می‌شود (اولویت با بالایی).</p>
+      {% else %}
+      <div class="empty">تاریخ را وارد کن و «دریافت لیست غذا» را بزن؛ غذاهای هر وعده می‌آید و فقط تیک می‌زنی.</div>
+      {% endif %}
+
+      <details class="manual"{% if not menu %} open{% endif %}>
+        <summary>نوشتن دستی نام غذا</summary>
         <label>وعده
           <select name="meal">{% for m in MEALS %}<option value="{{ m }}">{{ m or 'فرقی نمی‌کند' }}</option>{% endfor %}</select>
         </label>
-        <label>تعداد <input name="quantity" type="number" min="1" max="5" value="1"></label>
-      </div>
-      <label>غذاهای دلخواه — هر خط یکی، به ترتیب اولویت (<code>*</code> = هر غذایی)
-        <textarea name="foods" rows="4" required placeholder="جوجه کباب&#10;چلو کباب&#10;*"></textarea>
-      </label>
+        <label>غذاهای دلخواه — هر خط یکی، به ترتیب اولویت (<code>*</code> = هر غذایی)
+          <textarea name="foods" rows="3" placeholder="جوجه کباب&#10;چلو کباب&#10;*"></textarea>
+        </label>
+        {% if menu %}<p class="muted small">اگر بالا چیزی تیک خورده باشد، این بخش نادیده گرفته می‌شود.</p>{% endif %}
+      </details>
+
       <div class="row">
+        <label>تعداد <input name="quantity" type="number" min="1" max="5" value="1"></label>
         <label>فقط از ساعت <input name="active_from" type="time"></label>
         <label>تا ساعت <input name="active_to" type="time"></label>
       </div>
-      <p class="muted">هر حدود {{ poll_seconds|int }} ثانیه یک بار سبد چک می‌شود (با تأخیر تصادفی و سقف ساعتی، تا حساب مسدود نشود).</p>
-      <button>شروع پیگیری</button>
+      <p class="note">هر حدود {{ poll_seconds|int }} ثانیه یک بار سبد چک می‌شود (با تأخیر تصادفی و سقف ساعتی، تا حساب مسدود نشود).</p>
+      <button class="block">شروع پیگیری</button>
     </form>
   </section>
 </div>
 
 <section class="card">
-  <h2>کارها</h2>
-  {% if not jobs %}<p class="muted">هنوز کاری ثبت نشده.</p>{% endif %}
-  <div class="table">
-  <table>
+  <div class="card-head">
+    <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg></span>
+    <h2>کارها</h2>
+    {% if jobs %}<span class="badge count">{{ jobs|length }}</span>{% endif %}
+  </div>
+  {% if not jobs %}<div class="empty">هنوز کاری ثبت نشده. از فرم بالا اولین پیگیری را شروع کن.</div>{% endif %}
+  <div class="jobs">
     {% for j in jobs %}
-    <tr>
-      <td><b>{{ j.date }}</b> {{ j.meal }}</td>
-      <td>{{ j.foods.splitlines()|join('، ') }} ×{{ j.quantity }}</td>
-      <td><span class="badge {{ j.status }}">{{ STATUS_FA[j.status] }}</span><div class="muted small">{{ j.message }}</div></td>
-      <td class="actions">
+    <div class="job">
+      <div class="job-date"><b>{{ j.date }}</b><span>{{ j.meal or 'هر وعده' }}</span></div>
+      <div>
+        <div class="job-foods">{{ j.foods.splitlines()|join('، ') }} <span class="qty">×{{ j.quantity }}</span></div>
+        <span class="badge {{ j.status }}">{{ STATUS_FA[j.status] }}</span>
+        {% if j.message %}<div class="job-msg">{{ j.message }}</div>{% endif %}
+      </div>
+      <div class="actions">
         {% if j.status == 'active' %}
           <form method="post" action="/jobs/{{ j.id }}/stop"><button class="link">توقف</button></form>
         {% else %}
           {% if j.status != 'done' %}<form method="post" action="/jobs/{{ j.id }}/resume"><button class="link">ادامه</button></form>{% endif %}
           <form method="post" action="/jobs/{{ j.id }}/delete"><button class="link danger">حذف</button></form>
         {% endif %}
-      </td>
-    </tr>
+      </div>
+    </div>
     {% endfor %}
-  </table>
   </div>
 </section>
 
 <section class="card">
-  <h2>گزارش</h2>
+  <div class="card-head">
+    <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+    <h2>گزارش</h2>
+  </div>
+  {% if not logs %}<div class="empty">هنوز گزارشی نیست.</div>{% endif %}
   <ul class="logs">
-    {% for l in logs %}<li class="{{ l.level }}"><span class="muted small">{{ l.created_at|ts }}</span> {{ l.message }}</li>{% endfor %}
+    {% for l in logs %}<li class="{{ l.level }}"><time>{{ l.created_at|ts }}</time><span>{{ l.message }}</span></li>{% endfor %}
   </ul>
 </section>
 {% endblock %}

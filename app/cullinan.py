@@ -33,6 +33,7 @@ SEL = {
 
 # Dropdown entries that mean "nothing selected".
 PLACEHOLDERS = {"", "-", "--", "0", "انتخاب", "انتخاب کنید", "---"}
+MEAL_NAMES = ("صبحانه", "ناهار", "شام", "سحری", "افطار")
 WRONG_PASSWORD_HINTS = ("رمز", "کلمه عبور", "نام کاربری")
 ERROR_HINTS = ("خطا", "ناموفق", "کافی نیست", "موجود نیست", "امکان", "مجاز نیست", "error")
 
@@ -119,6 +120,12 @@ def _css(item: dict) -> str:
 
 def _real_options(select: dict) -> list[dict]:
     return [o for o in select["options"] if norm(o["text"]) not in PLACEHOLDERS]
+
+
+def _food_names(select: dict) -> list[str]:
+    """Option texts without a trailing stock/price note like "(3)"."""
+    names = [re.sub(r"\s*\(\s*[\d,٬]+\s*\)\s*$", "", o["text"]).strip() for o in _real_options(select)]
+    return list(dict.fromkeys(n for n in names if n))
 
 
 class CullinanClient:
@@ -328,6 +335,35 @@ class CullinanClient:
     async def _select(self, page: Page, select: dict, value: str) -> None:
         await self.throttle.wait(step=True)
         await self._postback(page, lambda: page.select_option(_css(select), value=value))
+
+    async def check_basket(self) -> None:
+        """Log in and make sure the basket page opens (used by the login test)."""
+        url = urljoin(config.SITE_URL, config.BASKET_PATH)
+        await self.login()
+        page = await self._goto(url, step=True)
+        if await self._on_login_page(page):
+            raise SiteError("ورود انجام شد ولی صفحهٔ سبد غذایی باز نشد")
+
+    async def read_menu(self, date: str) -> dict[str, list[str]]:
+        """Foods offered on `date`, per meal. Read-only: nothing is ticked or saved."""
+        self.dialogs.clear()
+        page = await self.open_basket(date)
+        grid = await self.read_grid(page)
+        index = self._free_slot_index(grid)
+        slot = self._slot(grid, index)
+        meal_filter = next(
+            (f for f in slot["filters"] if any(matches(o["text"], m) for o in f["options"] for m in MEAL_NAMES)),
+            None,
+        )
+        if meal_filter is None:
+            return {"": _food_names(slot["food"])}
+        menu = {}
+        for opt in _real_options(meal_filter):
+            if not opt["selected"]:
+                await self._select(page, meal_filter, opt["value"])
+            slot = self._slot(await self.read_grid(page), index)
+            menu[norm(opt["text"])] = _food_names(slot["food"])
+        return menu
 
     async def attempt(self, job: Job) -> Attempt:
         """One polling round: look at the basket and buy if a wanted food is there."""

@@ -84,6 +84,19 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         await c.close()
         self.assertEqual(fake_site.PURCHASES, [])
 
+    async def test_reads_menu_per_meal(self):
+        fake_site.STOCK["1405/08/05"] = {"ناهار": {"جوجه کباب": 2, "خوراک مرغ": 1}, "شام": {"عدس پلو": 3}}
+        c = self.client()
+        menu = await c.read_menu("1405/08/05")
+        await c.close()
+        self.assertEqual(menu, {"صبحانه": [], "ناهار": ["جوجه کباب", "خوراک مرغ"], "شام": ["عدس پلو"]})
+        self.assertEqual(fake_site.PURCHASES, [])
+
+    async def test_check_basket(self):
+        c = self.client()
+        await c.check_basket()
+        await c.close()
+
     async def test_wrong_password_stops(self):
         c = self.client(password="bad")
         with self.assertRaises(LoginFailed):

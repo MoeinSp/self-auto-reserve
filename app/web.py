@@ -1,6 +1,6 @@
 """Web panel: friends sign up, store their site login, and queue basket jobs."""
-import asyncio
 import datetime as dt
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -119,18 +119,21 @@ def dashboard(request: Request):
         account = c.execute("SELECT site_username FROM accounts WHERE user_id = ?", (uid,)).fetchone()
         jobs = c.execute("SELECT * FROM jobs WHERE user_id = ? ORDER BY id DESC LIMIT 50", (uid,)).fetchall()
         logs = c.execute("SELECT * FROM logs WHERE user_id = ? ORDER BY id DESC LIMIT 40", (uid,)).fetchall()
+        menu_row = c.execute(
+            "SELECT * FROM menus WHERE user_id = ? AND date >= ? ORDER BY fetched_at DESC LIMIT 1",
+            (uid, jalali.today_str()),
+        ).fetchone()
+    menu = json.loads(menu_row["data"]) if menu_row else None
     return _render(
         request, "dashboard.html", user=user, account=account, jobs=jobs, logs=logs,
         today=jalali.today_str(), captcha_pending=captcha.manual.pending(uid),
-        poll_seconds=config.POLL_SECONDS,
+        poll_seconds=config.POLL_SECONDS, op=worker.ops.get(uid), now=time.time(),
+        menu=menu, menu_date=menu_row["date"] if menu_row else None,
+        menu_at=menu_row["fetched_at"] if menu_row else None,
     )
 
 
-@app.post("/account")
-def save_account(request: Request, site_username: str = Form(...), site_password: str = Form(...)):
-    uid = _uid(request)
-    if not uid:
-        return _back("/login")
+def _save_account(uid: int, site_username: str, site_password: str) -> None:
     with db.tx() as c:
         c.execute(
             "INSERT INTO accounts (user_id, site_username, site_password_enc) VALUES (?, ?, ?) "
@@ -141,24 +144,69 @@ def save_account(request: Request, site_username: str = Form(...), site_password
     task = worker.tasks.pop(uid, None)  # restart with the new credentials
     if task:
         task.cancel()
+
+
+def _has_account(uid: int) -> bool:
+    with db.tx() as c:
+        return c.execute("SELECT 1 FROM accounts WHERE user_id = ?", (uid,)).fetchone() is not None
+
+
+@app.post("/account")
+def save_account(request: Request, site_username: str = Form(...), site_password: str = Form(...)):
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    _save_account(uid, site_username, site_password)
     return _back("/", "اطلاعات ورود ذخیره شد (رمزنگاری‌شده).", request)
 
 
 @app.post("/account/test")
-async def test_account(request: Request):
+def test_account(request: Request, site_username: str = Form(""), site_password: str = Form("")):
     uid = _uid(request)
     if not uid:
         return _back("/login")
-
-    async def run():
-        try:
-            db.log(uid, await worker.test_login(uid), "success")
-        except Exception as exc:
-            db.log(uid, f"تست ورود ناموفق: {exc}", "error")
-
+    # Typed a new password and pressed "test": save it first so the test uses it.
+    if site_username.strip() and site_password:
+        _save_account(uid, site_username, site_password)
+    if not _has_account(uid):
+        return _back("/", "اول شماره دانشجویی و رمز سامانه را وارد کن.", request)
     # Runs in the background: it may wait for a manual captcha from this page.
-    asyncio.create_task(run())
-    return _back("/", "تست ورود شروع شد؛ چند ثانیه بعد صفحه را تازه کن.", request)
+    if not worker.test_login(uid):
+        return _back("/", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+    return _back("/")
+
+
+@app.post("/menu")
+def fetch_menu(request: Request, date: str = Form(...)):
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    day = jalali.normalize_date(date)
+    if not day:
+        return _back("/", "تاریخ را به شکل ۱۴۰۵/۰۸/۰۵ وارد کن", request)
+    if not _has_account(uid):
+        return _back("/", "اول اطلاعات ورود سامانه را ذخیره کن", request)
+    if not worker.fetch_menu(uid, day):
+        return _back("/", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+    return _back("/")
+
+
+def _picked_foods(uid: int, menu_date: str, picks: list[str]) -> dict[str, list[str]]:
+    """Map ticked "meal_index:food_index" boxes back to {meal: [food, ...]}."""
+    with db.tx() as c:
+        row = c.execute("SELECT data FROM menus WHERE user_id = ? AND date = ?", (uid, menu_date)).fetchone()
+    if not row:
+        return {}
+    meals = list(json.loads(row["data"]).items())
+    chosen: dict[str, list[str]] = {}
+    for pick in picks:
+        try:
+            m, f = (int(x) for x in pick.split(":"))
+            meal, foods = meals[m]
+            chosen.setdefault(meal, []).append(foods[f])
+        except (ValueError, IndexError):
+            continue
+    return chosen
 
 
 @app.post("/jobs")
@@ -166,31 +214,39 @@ def create_job(
     request: Request,
     date: str = Form(...),
     meal: str = Form(""),
-    foods: str = Form(...),
+    foods: str = Form(""),
     quantity: int = Form(1),
     active_from: str = Form(""),
     active_to: str = Form(""),
+    menu_date: str = Form(""),
+    picks: list[str] = Form([]),
 ):
     uid = _uid(request)
     if not uid:
         return _back("/login")
-    day = jalali.normalize_date(date)
+    if picks and menu_date:
+        day = menu_date
+        # One job per meal, with the ticked foods in menu order.
+        wanted = [(m, "\n".join(f)) for m, f in _picked_foods(uid, menu_date, picks).items()]
+    else:
+        day = jalali.normalize_date(date)
+        wanted = [(meal if meal in MEALS else "", foods.strip())] if parse_foods(foods) else []
     if not day:
         return _back("/", "تاریخ را به شکل ۱۴۰۵/۰۸/۰۵ وارد کن", request)
-    if not parse_foods(foods):
-        return _back("/", "حداقل یک غذا وارد کن (یا * برای هر غذایی)", request)
-    if meal not in MEALS:
-        meal = ""
+    if not wanted:
+        return _back("/", "حداقل یک غذا تیک بزن یا بنویس (یا * برای هر غذایی)", request)
+    if not _has_account(uid):
+        return _back("/", "اول اطلاعات ورود سامانه را ذخیره کن", request)
     with db.tx() as c:
-        if not c.execute("SELECT 1 FROM accounts WHERE user_id = ?", (uid,)).fetchone():
-            return _back("/", "اول اطلاعات ورود سامانه را ذخیره کن", request)
         now = time.time()
-        c.execute(
-            "INSERT INTO jobs (user_id, date, meal, foods, quantity, active_from, active_to, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (uid, day, meal, foods.strip(), max(1, min(quantity, 5)), active_from, active_to, now, now),
-        )
-    return _back("/", "کار جدید اضافه شد؛ ربات شروع به پیگیری سبد می‌کند.", request)
+        for job_meal, job_foods in wanted:
+            c.execute(
+                "INSERT INTO jobs (user_id, date, meal, foods, quantity, active_from, active_to, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (uid, day, job_meal, job_foods, max(1, min(quantity, 5)), active_from, active_to, now, now),
+            )
+    label = "کار جدید اضافه شد" if len(wanted) == 1 else f"{len(wanted)} کار جدید (یکی برای هر وعده) اضافه شد"
+    return _back("/", f"{label}؛ ربات شروع به پیگیری سبد می‌کند.", request)
 
 
 @app.post("/jobs/{job_id}/{action}")

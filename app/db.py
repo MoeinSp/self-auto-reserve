@@ -44,6 +44,14 @@ CREATE TABLE IF NOT EXISTS logs (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS logs_user ON logs(user_id, id);
+-- Foods offered in the basket for a date, read on demand so users can tick them.
+CREATE TABLE IF NOT EXISTS menus (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    data TEXT NOT NULL,            -- JSON: {meal: [food, ...]}
+    fetched_at REAL NOT NULL,
+    PRIMARY KEY (user_id, date)
+);
 """
 
 
