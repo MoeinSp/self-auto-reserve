@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid2">
+  <section class="card">
+    <h2>ورود به پنل</h2>
+    <form method="post" action="/login">
+      <label>نام کاربری پنل <input name="username" required autocomplete="username"></label>
+      <label>رمز پنل <input name="password" type="password" required autocomplete="current-password"></label>
+      <button>ورود</button>
+    </form>
+  </section>
+  <section class="card">
+    <h2>ثبت‌نام</h2>
+    <p class="muted">این رمز فقط برای همین پنل است، نه سامانهٔ سلف.</p>
+    <form method="post" action="/register">
+      <label>نام کاربری پنل <input name="username" required autocomplete="username"></label>
+      <label>رمز پنل (حداقل ۸ کاراکتر) <input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
+      {% if invite %}<label>کد دعوت <input name="invite"></label>{% endif %}
+      <button class="secondary">ثبت‌نام</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

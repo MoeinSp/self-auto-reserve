@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block header_extra %}
+<span class="muted">{{ user.username }} · امروز {{ today }}</span>
+<form method="post" action="/logout"><button class="link">خروج</button></form>
+{% endblock %}
+{% block content %}
+
+{% if captcha_pending %}
+<section class="card warn">
+  <h2>کپچا را وارد کن</h2>
+  <p>ربات نتوانست کد امنیتی را بخواند.</p>
+  <img src="/captcha.png?{{ range(100000)|random }}" alt="کپچا" class="captcha">
+  <form method="post" action="/captcha" class="row">
+    <input name="code" inputmode="numeric" autocomplete="off" required autofocus>
+    <button>ارسال</button>
+  </form>
+</section>
+{% endif %}
+
+<div class="grid2">
+  <section class="card">
+    <h2>اطلاعات ورود سامانهٔ سلف</h2>
+    {% if account %}<p class="muted">ذخیره شده برای <b>{{ account.site_username }}</b>. برای تغییر دوباره وارد کن.</p>{% endif %}
+    <form method="post" action="/account">
+      <label>شماره دانشجویی <input name="site_username" required value="{{ account.site_username if account else '' }}"></label>
+      <label>رمز سامانه <input name="site_password" type="password" required autocomplete="off"></label>
+      <button>ذخیره</button>
+    </form>
+    {% if account %}
+    <form method="post" action="/account/test"><button class="secondary">تست ورود</button></form>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>خرید خودکار از سبد غذایی</h2>
+    <form method="post" action="/jobs">
+      <div class="row">
+        <label>تاریخ <input name="date" value="{{ today }}" required placeholder="1405/08/05"></label>
+        <label>وعده
+          <select name="meal">{% for m in MEALS %}<option value="{{ m }}">{{ m or 'فرقی نمی‌کند' }}</option>{% endfor %}</select>
+        </label>
+        <label>تعداد <input name="quantity" type="number" min="1" max="5" value="1"></label>
+      </div>
+      <label>غذاهای دلخواه — هر خط یکی، به ترتیب اولویت (<code>*</code> = هر غذایی)
+        <textarea name="foods" rows="4" required placeholder="جوجه کباب&#10;چلو کباب&#10;*"></textarea>
+      </label>
+      <div class="row">
+        <label>فقط از ساعت <input name="active_from" type="time"></label>
+        <label>تا ساعت <input name="active_to" type="time"></label>
+      </div>
+      <p class="muted">هر حدود {{ poll_seconds|int }} ثانیه یک بار سبد چک می‌شود (با تأخیر تصادفی و سقف ساعتی، تا حساب مسدود نشود).</p>
+      <button>شروع پیگیری</button>
+    </form>
+  </section>
+</div>
+
+<section class="card">
+  <h2>کارها</h2>
+  {% if not jobs %}<p class="muted">هنوز کاری ثبت نشده.</p>{% endif %}
+  <div class="table">
+  <table>
+    {% for j in jobs %}
+    <tr>
+      <td><b>{{ j.date }}</b> {{ j.meal }}</td>
+      <td>{{ j.foods.splitlines()|join('، ') }} ×{{ j.quantity }}</td>
+      <td><span class="badge {{ j.status }}">{{ STATUS_FA[j.status] }}</span><div class="muted small">{{ j.message }}</div></td>
+      <td class="actions">
+        {% if j.status == 'active' %}
+          <form method="post" action="/jobs/{{ j.id }}/stop"><button class="link">توقف</button></form>
+        {% else %}
+          {% if j.status != 'done' %}<form method="post" action="/jobs/{{ j.id }}/resume"><button class="link">ادامه</button></form>{% endif %}
+          <form method="post" action="/jobs/{{ j.id }}/delete"><button class="link danger">حذف</button></form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>گزارش</h2>
+  <ul class="logs">
+    {% for l in logs %}<li class="{{ l.level }}"><span class="muted small">{{ l.created_at|ts }}</span> {{ l.message }}</li>{% endfor %}
+  </ul>
+</section>
+{% endblock %}

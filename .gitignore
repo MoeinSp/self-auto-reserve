@@ -2,3 +2,7 @@
 .env
 __pycache__/
 node_modules/
+.venv/
+data/
+dumps/
+*.pyc
