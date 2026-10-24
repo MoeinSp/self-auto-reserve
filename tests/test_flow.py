@@ -103,6 +103,7 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_reads_menu_and_reservations_from_week_page(self):
         fake_site.MENU["1405/08/05"] = {
+            "صبحانه": {"foods": [], "locked": True},
             "ناهار": {"foods": ["جوجه کباب", "خوراک مرغ"], "reserved": "خوراک مرغ"},
             "شام": {"foods": ["عدس پلو", "کوکو"], "locked": True},
         }
@@ -361,7 +362,7 @@ class UnitTest(unittest.TestCase):
             self.assertIn("account_id", pk_cols)
 
             # Insert for account 1
-            menu_data1 = json.dumps({"ناهار": {"foods": ["قیمه"]}})
+            menu_data1 = json.dumps({"ناهار": {"foods": ["قیمه"]}}, ensure_ascii=False)
             c.execute(
                 "INSERT INTO menus (user_id, account_id, date, data, fetched_at) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(user_id, account_id, date) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at",
@@ -369,7 +370,7 @@ class UnitTest(unittest.TestCase):
             )
 
             # Insert for account 2 (same user, same date, different account)
-            menu_data2 = json.dumps({"ناهار": {"foods": ["قورمه سبزی"]}})
+            menu_data2 = json.dumps({"ناهار": {"foods": ["قورمه سبزی"]}}, ensure_ascii=False)
             c.execute(
                 "INSERT INTO menus (user_id, account_id, date, data, fetched_at) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(user_id, account_id, date) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at",
