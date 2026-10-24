@@ -214,7 +214,7 @@ details.manual[open] summary { margin-bottom: 10px; }
 .logs li { display: flex; gap: 10px; padding: 7px 4px; border-top: 1px solid var(--line); font-size: 14px; }
 .logs li:first-child { border-top: 0; }
 .logs li::before { content: ""; flex: none; width: 8px; height: 8px; margin-top: 9px; border-radius: 50%; background: var(--line); }
-.logs time { flex: none; color: var(--muted); font-size: 12px; padding-top: 2px; direction: ltr; }
+.logs time { flex: none; color: var(--muted); font-size: 12px; padding-top: 2px; white-space: nowrap; }
 .logs .msg {
   min-width: 0; overflow-wrap: anywhere;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;

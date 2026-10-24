@@ -124,6 +124,19 @@ class UnitTest(unittest.TestCase):
         self.assertEqual(to_jalali(dt.date(2025, 3, 21)), (1404, 1, 1))
         self.assertEqual(normalize_date("۱۴۰۵/۸/۵"), "1405/08/05")
 
+    def test_iran_time(self):
+        import datetime as dt
+
+        from app.jalali import format_ts
+
+        # 2026-10-24 11:10:58 UTC is 14:40:58 on 2 Aban in Tehran.
+        ts = dt.datetime(2026, 10, 24, 11, 10, 58, tzinfo=dt.timezone.utc).timestamp()
+        self.assertTrue(format_ts(ts).startswith("2 آبان"))
+        self.assertTrue(format_ts(ts).endswith("14:40:58"))
+        # 22:00 UTC is already the next Jalali day in Iran.
+        late = dt.datetime(2026, 10, 24, 22, 0, tzinfo=dt.timezone.utc).timestamp()
+        self.assertTrue(format_ts(late).startswith("3 آبان"))
+
     def test_matches(self):
         self.assertTrue(matches("جوجه كباب (3)", "جوجه کباب"))
         self.assertFalse(matches("کباب کوبیده", "جوجه کباب"))

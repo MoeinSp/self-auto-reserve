@@ -20,9 +20,28 @@ def to_jalali(g: dt.date) -> tuple[int, int, int]:
     return jy, 7 + (days - 186) // 30, 1 + (days - 186) % 30
 
 
+# Iran has used a fixed UTC+03:30 since daylight saving was abolished in 2022.
+# The server may run in another time zone (UTC), so convert explicitly.
+IRAN_TZ = dt.timezone(dt.timedelta(hours=3, minutes=30))
+MONTHS = ("فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
+          "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند")
+
+
+def now_iran() -> dt.datetime:
+    return dt.datetime.now(IRAN_TZ)
+
+
 def today_str() -> str:
-    y, m, d = to_jalali(dt.date.today())
+    y, m, d = to_jalali(now_iran().date())
     return f"{y:04d}/{m:02d}/{d:02d}"
+
+
+def format_ts(timestamp: float) -> str:
+    """Unix time -> e.g. '۲ آبان ۱۴:۴۰:۵۸' (Iran time); the year only if not this year."""
+    t = dt.datetime.fromtimestamp(timestamp, IRAN_TZ)
+    y, m, d = to_jalali(t.date())
+    year = "" if y == to_jalali(now_iran().date())[0] else f" {y}"
+    return f"{d} {MONTHS[m - 1]}{year} {t:%H:%M:%S}"
 
 
 def normalize_date(text: str) -> str | None:

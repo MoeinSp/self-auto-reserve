@@ -1,5 +1,5 @@
 """Web panel: friends sign up, store their site login, and queue basket jobs."""
-import datetime as dt
+
 import json
 import logging
 import time
@@ -19,7 +19,7 @@ from .worker import worker
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=HERE / "templates")
-templates.env.filters["ts"] = lambda t: dt.datetime.fromtimestamp(t).strftime("%m/%d %H:%M:%S")
+templates.env.filters["ts"] = jalali.format_ts
 
 MEALS = ["", "صبحانه", "ناهار", "شام"]
 STATUS_FA = {"active": "در حال پیگیری", "done": "خریداری شد", "stopped": "متوقف", "failed": "ناموفق"}

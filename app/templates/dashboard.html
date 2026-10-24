@@ -150,7 +150,7 @@
         <span class="job-meta">
           {% if j.attempts %}تلاش {{ j.attempts }}{% else %}هنوز بررسی نشده{% endif %}
           · هر {{ (j.poll_seconds or poll_seconds)|round(1)|replace('.0', '') }} ثانیه
-          {% if j.last_check %}· آخرین بررسی <span dir="ltr">{{ j.last_check|ts }}</span>{% endif %}
+          {% if j.last_check %}· آخرین بررسی {{ j.last_check|ts }}{% endif %}
         </span>
         {% if j.message %}<div class="job-msg">{{ j.message }}</div>{% endif %}
       </div>

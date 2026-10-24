@@ -1,6 +1,5 @@
 """Background loop: one task per user that has active jobs."""
 import asyncio
-import datetime as dt
 import json
 import logging
 import time
@@ -25,7 +24,7 @@ def _in_window(job_row) -> bool:
     start, end = job_row["active_from"], job_row["active_to"]
     if not start or not end:
         return True
-    now = dt.datetime.now().strftime("%H:%M")
+    now = jalali.now_iran().strftime("%H:%M")  # the panel's time fields are Iran time
     if start <= end:
         return start <= now <= end
     return now >= start or now <= end  # window passes midnight
