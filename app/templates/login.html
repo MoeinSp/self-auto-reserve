@@ -25,7 +25,7 @@
     <form method="post" action="/register">
       <label>نام کاربری پنل <input name="username" required autocomplete="username"></label>
       <label>رمز پنل (حداقل ۸ کاراکتر) <input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
-      {% if invite %}<label>کد دعوت <input name="invite" autocomplete="off"></label>{% endif %}
+      {% if invite %}<label>کد دعوت <input name="invite" required autocomplete="off"></label>{% endif %}
       <p class="note">این رمز فقط برای همین پنل است، نه سامانهٔ سلف.</p>
       <button class="secondary block">ثبت‌نام</button>
     </form>

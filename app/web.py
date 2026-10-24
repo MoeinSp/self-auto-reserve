@@ -83,7 +83,7 @@ def register(
 ):
     with db.tx() as c:
         first_user = c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-        if not first_user and (not config.INVITE_CODE or invite.strip() != config.INVITE_CODE):
+        if config.INVITE_CODE and not first_user and invite.strip() != config.INVITE_CODE:
             return _back("/login", "کد دعوت نادرست است", request)
         if len(password) < 8 or not username.strip():
             return _back("/login", "رمز پنل حداقل ۸ کاراکتر باشد", request)

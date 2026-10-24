@@ -12,7 +12,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt \
- && playwright install --with-deps chromium \
+ && PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright playwright install --with-deps chromium \
  && rm -rf /var/lib/apt/lists/*
 
 COPY app ./app

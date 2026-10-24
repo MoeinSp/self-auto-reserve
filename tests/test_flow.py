@@ -232,6 +232,36 @@ class UnitTest(unittest.TestCase):
     def test_floor(self):
         self.assertGreaterEqual(Throttle(min_interval=0.1).min_interval, config.MIN_POLL_FLOOR)
 
+    def test_registration_invite_code_logic(self):
+        from starlette.requests import Request
+        from app import web, db, config
+
+        orig_invite = config.INVITE_CODE
+        try:
+            config.SECRET_KEY = 'test-secret'
+            with db.tx() as c:
+                c.execute('DELETE FROM users')
+            # 1) First user registers without invite code
+            config.INVITE_CODE = 'SECRET123'
+            req = Request({'type': 'http', 'session': {}})
+            res = web.register(req, username='user1', password='password123', invite='')
+            self.assertEqual(res.status_code, 303)
+            self.assertIn('ثبت‌نام انجام شد', req.session.get('flash', ''))
+
+            # 2) Second user with wrong invite code is rejected
+            req = Request({'type': 'http', 'session': {}})
+            res = web.register(req, username='user2', password='password123', invite='WRONG')
+            self.assertEqual(req.session.get('flash'), 'کد دعوت نادرست است')
+
+            # 3) Second user with empty invite code when INVITE_CODE is unset succeeds
+            config.INVITE_CODE = ''
+            req = Request({'type': 'http', 'session': {}})
+            res = web.register(req, username='user2', password='password123', invite='')
+            self.assertEqual(res.status_code, 303)
+            self.assertIn('ثبت‌نام انجام شد', req.session.get('flash', ''))
+        finally:
+            config.INVITE_CODE = orig_invite
+
 
 if __name__ == "__main__":
     unittest.main()
