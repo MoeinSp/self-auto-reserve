@@ -9,7 +9,7 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
 
-from . import captcha, db, jalali, security
+from . import captcha, config, db, jalali, security
 from .cullinan import Attempt, CullinanClient, Job, LoginFailed, SiteError, launch_browser
 from .ratelimit import RateLimited, Throttle
 from .text import parse_foods
