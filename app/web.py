@@ -410,12 +410,12 @@ def account_health(request: Request, account_id: int = 0):
 
     with db.tx() as c:
         last_err = c.execute(
-            "SELECT msg FROM logs WHERE user_id = ? AND level = 'error' ORDER BY id DESC LIMIT 1",
+            "SELECT message FROM logs WHERE user_id = ? AND level = 'error' ORDER BY id DESC LIMIT 1",
             (uid,)
         ).fetchone()
 
     is_failed = False
-    if last_err and any(w in last_err["msg"] for w in ("رمز اشتباه", "LoginFailed", "ورود ناموفق")):
+    if last_err and any(w in last_err["message"] for w in ("رمز اشتباه", "LoginFailed", "ورود ناموفق")):
         is_failed = True
 
     is_task_active = (account_id in worker.tasks and not worker.tasks[account_id].done())
@@ -448,7 +448,7 @@ async def request_pay(
     account_id: int = Form(...),
     amount: str = Form(...),
     unit: str = Form("toman"),
-    bank: int = Form(1),
+    bank: int = Form(0),
 ):
     uid = _uid(request)
     if not uid:
@@ -492,6 +492,10 @@ def gateway_redirect(token: str):
     fields = sess.get("fields", {})
     bank = sess.get("bank", "درگاه شاپرک")
     amt_str = f"{sess.get('amount_rials', 0):,} ریال"
+
+    # If gateway expects GET (like Sadad/Melli) or there are no POST form fields, redirect directly!
+    if sess.get("method") == "GET" or not fields:
+        return RedirectResponse(action, status_code=303)
 
     import html
     inputs_html = "\n".join(

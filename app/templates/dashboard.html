@@ -162,8 +162,8 @@
           </label>
           <label>انتخاب درگاه بانکی:
             <select name="bank">
-              <option value="1" selected>درگاه به پرداخت ملت (BPM)</option>
-              <option value="0">درگاه سداد (بانک ملی)</option>
+              <option value="0" selected>درگاه سداد (بانک ملی) — مستقیم و فعال</option>
+              <option value="1">درگاه به پرداخت ملت (BPM)</option>
             </select>
           </label>
         </div>
@@ -515,6 +515,14 @@ function checkAccountHealth(manual) {
       if (data.credit) {
         var cr = document.querySelector('.credit-amount strong');
         if (cr) cr.innerText = data.credit;
+        var placeholder = document.querySelector('.credit-not-synced');
+        if (placeholder) placeholder.innerHTML = '<strong>' + data.credit + '</strong>';
+      }
+      if (data.credit_updated_at) {
+        var tm = document.querySelector('.finance-time');
+        if (tm) {
+          tm.innerText = 'آخرین استعلام: ' + data.credit_updated_at;
+        }
       }
     })
     .catch(function(err) {

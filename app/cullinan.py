@@ -715,7 +715,15 @@ class CullinanClient:
                     break
 
         if not code and not has_error:
-            for code_sel in ("[id$='lblBarcode'], [id$='lblReceiptCode'], [id$='lblFish'], [id$='lblCode'], .receipt-code, #cphMain_lblResult"):
+            code_selectors = [
+                "[id$='lblBarcode']",
+                "[id$='lblReceiptCode']",
+                "[id$='lblFish']",
+                "[id$='lblCode']",
+                ".receipt-code",
+                "#cphMain_lblResult",
+            ]
+            for code_sel in code_selectors:
                 loc = page.locator(code_sel).first
                 if await loc.count() > 0:
                     c_text = norm(await loc.inner_text()).strip()
@@ -740,7 +748,7 @@ class CullinanClient:
             "meal": meal,
         }
 
-    async def create_payment_session(self, amount_rials: int, bank_idx: int = 1) -> dict:
+    async def create_payment_session(self, amount_rials: int, bank_idx: int = 0) -> dict:
         """Navigate to ePay/ePay_Payment.aspx, enter amount, click bank logo,
         confirm on Step 2 (#cphMain_btnPay), and capture direct bank gateway data.
         bank_idx: 0 = Sadad (Melli), 1 = BehPardakht (Mellat)
@@ -748,6 +756,28 @@ class CullinanClient:
         page = await self._open("ePay/ePay_Payment.aspx")
 
         captured_data: dict = {}
+
+        def handle_request(req):
+            url = req.url
+            if any(domain in url for domain in ("shaparak.ir", "cbinasim.ir", "hadaf.cfu.ac.ir")):
+                post_data = req.post_data or ""
+                fields = {}
+                if post_data:
+                    from urllib.parse import parse_qs
+                    try:
+                        parsed = parse_qs(post_data)
+                        fields = {k: v[0] if len(v) == 1 else v for k, v in parsed.items()}
+                    except Exception:
+                        pass
+                bank_name = "به‌پرداخت ملت" if "bpm.shaparak" in url else ("سداد (بانک ملی)" if "sadad" in url else "درگاه شاپرک")
+                captured_data.update({
+                    "action": url,
+                    "method": req.method,
+                    "fields": fields,
+                    "bank": bank_name,
+                })
+
+        page.on("request", handle_request)
 
         # Route interceptor: catch any request heading towards Shaparak / payment gateways
         async def on_route(route, request):
@@ -871,6 +901,22 @@ class CullinanClient:
                 };
             }
         """)
+
+        # Ensure txtPaymentAmount is in form when btnPay is submitted
+        await page.evaluate("""(amt_val) => {
+            const form = document.getElementById("MainForm") || document.forms[0];
+            if (form) {
+                let amt = form.querySelector('input[name="ctl00$cphMain$txtPaymentAmount"], input[name$="txtPaymentAmount"]');
+                if (!amt) {
+                    amt = document.createElement("input");
+                    amt.type = "hidden";
+                    amt.name = "ctl00$cphMain$txtPaymentAmount";
+                    amt.id = "cphMain_txtPaymentAmount";
+                    form.appendChild(amt);
+                }
+                amt.value = amt_val;
+            }
+        }""", amount_str)
 
         # Click payment button (#cphMain_btnPay)
         await self.throttle.wait(step=True)

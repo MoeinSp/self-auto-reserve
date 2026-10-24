@@ -291,7 +291,7 @@ class Worker:
 
         return self.start_op(user_id, "رزرو خودکار هفته بعد", run, account_id=account_id)
 
-    def request_payment_gateway(self, user_id: int, account_id: int, amount_rials: int, bank_idx: int = 1) -> bool:
+    def request_payment_gateway(self, user_id: int, account_id: int, amount_rials: int, bank_idx: int = 0) -> bool:
         async def run(client: CullinanClient) -> str:
             await client.login()
             data = await client.create_payment_session(amount_rials, bank_idx)
