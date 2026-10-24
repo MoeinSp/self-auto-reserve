@@ -311,9 +311,10 @@ class UnitTest(unittest.TestCase):
             c.execute("INSERT INTO accounts (id, user_id, site_username, site_password_enc, display_name) VALUES (10, 1, '401', 'enc', 'Acc 10')")
 
         # Fake some rate limit hits
+        now = time.monotonic()
         t = worker.throttle(10)
-        t._hits.extend([1000.0, 1001.0, 1002.0])
-        t._logins.extend([1000.0])
+        t._hits.extend([now - 10, now - 5, now])
+        t._logins.extend([now])
         stats = worker.get_throttle_stats(10)
         self.assertEqual(stats["hits"], 3)
         self.assertEqual(stats["logins"], 1)
