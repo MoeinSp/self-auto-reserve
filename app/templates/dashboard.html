@@ -178,8 +178,13 @@
           </label>
         </div>
       </div>
+      <div style="margin-top:14px;padding:10px 14px;background:#fff8eb;border:1px solid #ffd899;border-radius:10px;font-size:12px;line-height:1.7;color:#854d0e">
+        ⚠️ <strong>نکته ضروری سلف:</strong> سرور دانشگاه تنها در صورتی تراکنش شاپرک را تأیید و شارژ می‌کند که در مرورگر گوشی لاگین سلف داشته باشید، در غیر این صورت به دلیل مسائل امنیتی سلف، شاپرک پول را به حسابتان برمی‌گرداند.
+      </div>
       <div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
-        <span class="muted small">ربات مستقیماً توکن درگاه شاپرک را می‌گیرد و لینک ورود به درگاه را تقدیم می‌کند.</span>
+        <a href="https://nut.uk.ac.ir/ePay/ePay_Payment.aspx" target="_blank" rel="noopener noreferrer" class="secondary" style="padding:10px 16px;border-radius:10px;text-decoration:none;font-size:13px;font-weight:bold;color:#475569">
+          🏛️ پرداخت مستقیم از صفحه سلف ↗
+        </a>
         <button class="pay-submit-btn" {% if op and op.state == 'running' %}disabled{% endif %}>
           ⚡ دریافت لینک مستقیم درگاه بانکی
         </button>
