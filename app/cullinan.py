@@ -643,9 +643,16 @@ class CullinanClient:
         await self.throttle.wait(step=True)
         await self._postback(page, btn.click)
 
-        # 5) Step 2: Poll for UpdatePanel result (either btnAccept 'موافقم' or error alert)
+        # 5) Step 2: Poll for UpdatePanel result (either btnAccept 'موافقم', remind code, or error alert)
         btn_accept = None
         for _ in range(30):
+            # Check for direct remind code
+            remind_loc = page.locator("#cphMain_lblRemindId, [id$='lblRemindId']").first
+            if await remind_loc.count() > 0:
+                t = norm(await remind_loc.inner_text()).strip()
+                if t and any(ch.isdigit() for ch in t):
+                    break
+
             acc_loc = page.locator("#cphMain_btnAccept, input[name$='btnAccept'], input[value*='موافقم']").first
             if await acc_loc.count() > 0 and await acc_loc.is_visible():
                 btn_accept = acc_loc
@@ -670,6 +677,11 @@ class CullinanClient:
             await self.throttle.wait(step=True)
             await self._postback(page, btn_accept.click)
             for _ in range(30):
+                remind_loc = page.locator("#cphMain_lblRemindId, [id$='lblRemindId']").first
+                if await remind_loc.count() > 0:
+                    t = norm(await remind_loc.inner_text()).strip()
+                    if t and any(ch.isdigit() for ch in t):
+                        break
                 alert_loc = page.locator("#cphMain_alertBoxValue").first
                 if await alert_loc.count() > 0:
                     t = norm(await alert_loc.inner_text()).strip()
@@ -700,43 +712,51 @@ class CullinanClient:
         if not alert_text and self.dialogs:
             alert_text = norm(self.dialogs[-1]).strip()
 
-        # 7) Extract code from alert_text or receipt labels
+        # 7) Extract code from receipt labels or alert_text
         code = ""
+        used_count = ""
+        used_loc = page.locator("#cphMain_lblUsedRemindId, [id$='lblUsedRemindId']").first
+        if await used_loc.count() > 0:
+            used_count = norm(await used_loc.inner_text()).strip()
+
+        code_selectors = [
+            "#cphMain_lblRemindId",
+            "[id$='lblRemindId']",
+            "[id$='lblBarcode']",
+            "[id$='lblReceiptCode']",
+            "[id$='lblFish']",
+            "[id$='lblCode']",
+            ".receipt-code",
+            "#cphMain_lblResult",
+        ]
+        for code_sel in code_selectors:
+            loc = page.locator(code_sel).first
+            if await loc.count() > 0:
+                c_text = norm(await loc.inner_text()).strip()
+                m = re.search(r"(\d{3,12})", c_text)
+                if m:
+                    code = m.group(1)
+                    break
+
         patterns = [
             r"(?:کد|شماره)\s*(?:فیش|فراموشی|ژتون|بارکد)\s*[:=\-]?\s*(\d{3,12})",
             r"(\d{4,10})",
         ]
         has_error = any(h in alert_text for h in ("غیرفعال", "خطا", "یافت نشد", "ندارید", "خارج از بازه", "امکان", "سقف", "ناموفق", "پایان", "مجاز نیست"))
-        if alert_text and not has_error:
+        if not code and alert_text and not has_error:
             for pat in patterns:
                 m = re.search(pat, alert_text)
                 if m:
                     code = m.group(1)
                     break
 
-        if not code and not has_error:
-            code_selectors = [
-                "[id$='lblBarcode']",
-                "[id$='lblReceiptCode']",
-                "[id$='lblFish']",
-                "[id$='lblCode']",
-                ".receipt-code",
-                "#cphMain_lblResult",
-            ]
-            for code_sel in code_selectors:
-                loc = page.locator(code_sel).first
-                if await loc.count() > 0:
-                    c_text = norm(await loc.inner_text()).strip()
-                    m = re.search(r"(\d{3,12})", c_text)
-                    if m:
-                        code = m.group(1)
-                        break
-
         success = bool(code) or ("موفق" in alert_text and not has_error)
         msg = alert_text
         if not msg:
             if code:
                 msg = f"کد فیش فراموشی: {code}"
+                if used_count:
+                    msg += f" (دفعات استفاده‌شده در این ماه: {used_count})"
             else:
                 msg = "پاسخی از سامانه سلف دریافت نشد یا این وعده فاقد فیش است."
 

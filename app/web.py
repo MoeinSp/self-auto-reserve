@@ -16,7 +16,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import captcha, config, db, jalali, security
 from .text import norm, parse_foods
-from .worker import worker
+from .worker import PAYMENT_SESSIONS, worker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 HERE = Path(__file__).parent
@@ -475,7 +475,7 @@ async def request_pay(
 
 @app.get("/pay/gateway/{token}", response_class=HTMLResponse)
 def gateway_redirect(token: str):
-    sess = worker.PAYMENT_SESSIONS.get(token)
+    sess = PAYMENT_SESSIONS.get(token) or getattr(worker, "PAYMENT_SESSIONS", {}).get(token)
     if not sess or (time.time() - sess.get("created_at", 0) > 1800):
         return HTMLResponse(
             """<!DOCTYPE html><html dir="rtl" lang="fa"><head><meta charset="utf-8">

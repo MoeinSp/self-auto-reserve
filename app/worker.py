@@ -56,7 +56,10 @@ PAYMENT_SESSIONS: dict[str, dict] = {}
 
 
 class Worker:
+    PAYMENT_SESSIONS = PAYMENT_SESSIONS
+
     def __init__(self):
+        self.PAYMENT_SESSIONS = PAYMENT_SESSIONS
         self.tasks: dict[int, asyncio.Task] = {}  # account_id -> task
         self.throttles: dict[int, Throttle] = {}  # account_id -> Throttle
         # One on-demand operation (login test / menu fetch) per user, shown on the dashboard.
