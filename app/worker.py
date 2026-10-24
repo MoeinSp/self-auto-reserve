@@ -99,6 +99,33 @@ class Worker:
         # Kept across task restarts so limits survive a job being re-created.
         return self.throttles.setdefault(account_id, Throttle())
 
+    def reset_throttle(self, account_id: int | None = None) -> int:
+        """Reset rate limits for one account or all accounts."""
+        if account_id is not None:
+            t = self.throttles.get(account_id)
+            if t:
+                t.reset()
+            else:
+                self.throttle(account_id).reset()
+            return 1
+        count = 0
+        for t in self.throttles.values():
+            t.reset()
+            count += 1
+        return count
+
+    def get_throttle_stats(self, account_id: int) -> dict:
+        t = self.throttles.get(account_id)
+        if t:
+            return t.stats()
+        return {
+            "hits": 0,
+            "max_hits": config.MAX_REQUESTS_PER_HOUR,
+            "logins": 0,
+            "max_logins": config.MAX_LOGINS_PER_HOUR,
+            "is_limited": False,
+        }
+
     def client_for(self, account_id: int, own_lane: bool = False) -> CullinanClient:
         with db.tx() as c:
             acc = c.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()

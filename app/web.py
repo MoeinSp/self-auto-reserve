@@ -448,3 +448,149 @@ def captcha_answer(request: Request, code: str = Form(...)):
     if uid and captcha.manual.answer(uid, code):
         return _back("/", "کد ارسال شد.", request)
     return _back("/", "کپچایی در انتظار نبود.", request)
+
+
+
+# ------------------------------------------------------------------ admin
+def _is_admin(request: Request) -> bool:
+    uid = _uid(request)
+    if not uid:
+        return False
+    with db.tx() as c:
+        user = c.execute("SELECT is_admin FROM users WHERE id = ?", (uid,)).fetchone()
+        return bool(user and user["is_admin"])
+
+
+@app.get("/admin")
+def admin_page(request: Request):
+    if not _is_admin(request):
+        return _back("/", "دسترسی به پنل ادمین مجاز نیست.", request)
+    uid = _uid(request)
+    with db.tx() as c:
+        admin_user = c.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+        users = c.execute("""
+            SELECT u.id, u.username, u.is_admin, u.created_at,
+                   COUNT(DISTINCT a.id) AS accounts_count,
+                   COUNT(DISTINCT j.id) AS jobs_count
+            FROM users u
+            LEFT JOIN accounts a ON a.user_id = u.id
+            LEFT JOIN jobs j ON j.user_id = u.id
+            GROUP BY u.id
+            ORDER BY u.id
+        """).fetchall()
+
+        raw_accounts = c.execute("""
+            SELECT a.id, a.user_id, a.site_username, a.display_name, a.created_at,
+                   u.username AS owner_username,
+                   COUNT(CASE WHEN j.status = 'active' THEN 1 END) AS active_jobs_count
+            FROM accounts a
+            JOIN users u ON u.id = a.user_id
+            LEFT JOIN jobs j ON j.account_id = a.id
+            GROUP BY a.id
+            ORDER BY a.id
+        """).fetchall()
+
+        accounts = []
+        for acc in raw_accounts:
+            st = worker.get_throttle_stats(acc["id"])
+            accounts.append({**dict(acc), "stats": st})
+
+        jobs = c.execute("""
+            SELECT j.*, u.username AS owner_username,
+                   a.display_name AS account_name, a.site_username
+            FROM jobs j
+            JOIN users u ON u.id = j.user_id
+            LEFT JOIN accounts a ON a.id = j.account_id
+            ORDER BY j.id DESC LIMIT 100
+        """).fetchall()
+
+        logs = c.execute("""
+            SELECT l.*, u.username AS owner_username
+            FROM logs l
+            JOIN users u ON u.id = l.user_id
+            ORDER BY l.id DESC LIMIT 50
+        """).fetchall()
+
+        total_users = len(users)
+        total_accounts = len(accounts)
+        active_jobs = sum(1 for j in jobs if j["status"] == "active")
+
+    return _render(
+        request, "admin.html", user=admin_user, users=users,
+        accounts=accounts, jobs=jobs, logs=logs,
+        total_users=total_users, total_accounts=total_accounts, active_jobs=active_jobs,
+        max_requests_hour=config.MAX_REQUESTS_PER_HOUR,
+        max_logins_hour=config.MAX_LOGINS_PER_HOUR,
+    )
+
+
+@app.post("/admin/rate-limit/reset")
+def admin_reset_rate_limit(request: Request, account_id: int = Form(0)):
+    if not _is_admin(request):
+        return _back("/", "دسترسی مجاز نیست.", request)
+    account_id = int(account_id) if str(account_id).isdigit() else 0
+    if account_id > 0:
+        worker.reset_throttle(account_id)
+        with db.tx() as c:
+            c.execute(
+                "UPDATE jobs SET message = '' WHERE account_id = ? AND message LIKE '%سقف%'",
+                (account_id,),
+            )
+            acc = c.execute("SELECT display_name, site_username FROM accounts WHERE id = ?", (account_id,)).fetchone()
+            name = (acc["display_name"] or acc["site_username"]) if acc else f"حساب #{account_id}"
+        return _back("/admin", f"محدودیت (Rate Limit) برای «{name}» صفر شد.", request)
+    else:
+        count = worker.reset_throttle()
+        with db.tx() as c:
+            c.execute("UPDATE jobs SET message = '' WHERE message LIKE '%سقف%'")
+        return _back("/admin", f"محدودیت (Rate Limit) برای تمام {count} حساب صفر شد.", request)
+
+
+@app.post("/admin/users/{target_uid}/role")
+def admin_toggle_role(request: Request, target_uid: int):
+    if not _is_admin(request):
+        return _back("/", "دسترسی مجاز نیست.", request)
+    current_uid = _uid(request)
+    if current_uid == target_uid:
+        return _back("/admin", "نمی‌توانید نقش خودتان را تغییر دهید.", request)
+    with db.tx() as c:
+        u = c.execute("SELECT is_admin, username FROM users WHERE id = ?", (target_uid,)).fetchone()
+        if not u:
+            return _back("/admin", "کاربر پیدا نشد.", request)
+        new_role = 0 if u["is_admin"] else 1
+        c.execute("UPDATE users SET is_admin = ? WHERE id = ?", (new_role, target_uid))
+        role_label = "مدیر" if new_role else "کاربر عادی"
+    return _back("/admin", f"نقش کاربر «{u['username']}» به {role_label} تغییر یافت.", request)
+
+
+@app.post("/admin/users/{target_uid}/delete")
+def admin_delete_user(request: Request, target_uid: int):
+    if not _is_admin(request):
+        return _back("/", "دسترسی مجاز نیست.", request)
+    current_uid = _uid(request)
+    if current_uid == target_uid:
+        return _back("/admin", "نمی‌توانید حساب کاربری خودتان را حذف کنید.", request)
+    with db.tx() as c:
+        u = c.execute("SELECT username FROM users WHERE id = ?", (target_uid,)).fetchone()
+        if not u:
+            return _back("/admin", "کاربر پیدا نشد.", request)
+        accs = c.execute("SELECT id FROM accounts WHERE user_id = ?", (target_uid,)).fetchall()
+        for a in accs:
+            t = worker.tasks.pop(a["id"], None)
+            if t:
+                t.cancel()
+        c.execute("DELETE FROM users WHERE id = ?", (target_uid,))
+    return _back("/admin", f"کاربر «{u['username']}» و تمام اطلاعات مربوطه حذف شدند.", request)
+
+
+@app.post("/admin/jobs/{job_id}/{action}")
+def admin_job_action(request: Request, job_id: int, action: str):
+    if not _is_admin(request):
+        return _back("/", "دسترسی مجاز نیست.", request)
+    with db.tx() as c:
+        if action == "delete":
+            c.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        elif action in ("stop", "resume"):
+            status = "stopped" if action == "stop" else "active"
+            c.execute("UPDATE jobs SET status = ?, message = '', updated_at = ? WHERE id = ?", (status, time.time(), job_id))
+    return _back("/admin")

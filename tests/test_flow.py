@@ -296,6 +296,41 @@ class UnitTest(unittest.TestCase):
         finally:
             config.INVITE_CODE = orig_invite
 
+    def test_admin_rate_limit_reset(self):
+        from starlette.requests import Request
+        from app import web, db, config
+        from app.worker import worker
+
+        config.SECRET_KEY = "test-secret"
+        db.init()
+        with db.tx() as c:
+            c.execute("DELETE FROM users")
+            c.execute("INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (1, 'admin_user', 'hash', 1, 0)")
+            c.execute("INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (2, 'normal_user', 'hash', 0, 0)")
+            c.execute("DELETE FROM accounts")
+            c.execute("INSERT INTO accounts (id, user_id, site_username, site_password_enc, display_name) VALUES (10, 1, '401', 'enc', 'Acc 10')")
+
+        # Fake some rate limit hits
+        t = worker.throttle(10)
+        t._hits.extend([1000.0, 1001.0, 1002.0])
+        t._logins.extend([1000.0])
+        stats = worker.get_throttle_stats(10)
+        self.assertEqual(stats["hits"], 3)
+        self.assertEqual(stats["logins"], 1)
+
+        # Admin resets rate limit
+        req = Request({"type": "http", "session": {"uid": 1}, "query_string": b""})
+        res = web.admin_reset_rate_limit(req, account_id=10)
+        self.assertEqual(res.status_code, 303)
+        stats = worker.get_throttle_stats(10)
+        self.assertEqual(stats["hits"], 0)
+        self.assertEqual(stats["logins"], 0)
+
+        # Non-admin is rejected
+        req_non_admin = Request({"type": "http", "session": {"uid": 2}, "query_string": b""})
+        res_denied = web.admin_page(req_non_admin)
+        self.assertEqual(res_denied.status_code, 303)
+
 
 if __name__ == "__main__":
     unittest.main()

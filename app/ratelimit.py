@@ -42,6 +42,27 @@ class Throttle:
         if len(hits) >= cap:
             raise RateLimited(3600 - (now - hits[0]) + 1)
 
+    def reset(self) -> None:
+        """Clear all sliding window history so rate limits are immediately zeroed."""
+        self._hits.clear()
+        self._logins.clear()
+        self._last = -1e9
+
+    def stats(self) -> dict:
+        """Return current window statistics (requests and logins in the past 60 minutes)."""
+        now = time.monotonic()
+        while self._hits and now - self._hits[0] > 3600:
+            self._hits.popleft()
+        while self._logins and now - self._logins[0] > 3600:
+            self._logins.popleft()
+        return {
+            "hits": len(self._hits),
+            "max_hits": self.per_hour,
+            "logins": len(self._logins),
+            "max_logins": self.logins_per_hour,
+            "is_limited": len(self._hits) >= self.per_hour or len(self._logins) >= self.logins_per_hour,
+        }
+
     def lane(self) -> "Throttle":
         """A throttle with its own spacing that shares this one's hourly caps.
 

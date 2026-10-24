@@ -282,3 +282,59 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 0 16
 .danger-btn:hover {
   background: var(--err-soft) !important; border-color: var(--err) !important;
 }
+
+/* ------------------------------------------------------------- admin panel */
+.admin-header-row {
+  display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;
+  margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--line);
+}
+.admin-header-row h1 { margin: 0 0 4px; font-size: 22px; }
+.admin-header-row p { margin: 0; font-size: 13px; }
+.admin-pill-link {
+  color: var(--accent-text); background: var(--accent); padding: 2px 10px; border-radius: 99px;
+  text-decoration: none; font-size: 12px; font-weight: 700; transition: filter .15s;
+}
+.admin-pill-link:hover { filter: brightness(1.1); }
+.admin-pill {
+  display: inline-block; padding: 2px 8px; border-radius: 99px; background: var(--accent-soft);
+  color: var(--accent); font-size: 11px; font-weight: 700;
+}
+.reset-all-btn {
+  background: linear-gradient(135deg, #ef4444, #dc2626); color: #fff; font-weight: 700;
+  box-shadow: 0 2px 10px rgba(220, 38, 38, .3); padding: 10px 20px;
+}
+.reset-all-btn:hover { filter: brightness(1.1); }
+.table-responsive {
+  width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;
+}
+.admin-table {
+  width: 100%; border-collapse: collapse; font-size: 13px; text-align: right;
+}
+.admin-table th {
+  padding: 10px 12px; border-bottom: 2px solid var(--line); color: var(--muted); font-weight: 700; font-size: 12px;
+}
+.admin-table td {
+  padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: middle;
+}
+.admin-table tr:hover td {
+  background: var(--bg);
+}
+.user-tag {
+  display: inline-block; padding: 2px 8px; border-radius: 6px; background: var(--bg-2);
+  color: var(--muted); font-size: 12px; font-weight: 600;
+}
+.rate-bar-container {
+  width: 90px; height: 7px; background: var(--bg-2); border-radius: 99px; overflow: hidden; margin-bottom: 3px;
+}
+.rate-bar-fill {
+  height: 100%; background: var(--ok); border-radius: 99px; transition: width .3s ease;
+}
+.rate-bar-fill.full {
+  background: var(--err);
+}
+.small-btn {
+  padding: 4px 10px !important; font-size: 12px !important; font-weight: 600 !important;
+}
+.small-text {
+  font-size: 12px; line-height: 1.4;
+}

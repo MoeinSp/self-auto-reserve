@@ -15,6 +15,9 @@
 {% block header_extra %}
 <div class="user-chip">
   <span class="muted">امروز {{ today }}</span>
+  {% if user.is_admin %}
+    <a href="/admin" class="admin-pill-link">⚙️ پنل ادمین</a>
+  {% endif %}
   <span class="avatar">{{ user.username[:1]|upper }}</span>
   <span>{{ user.username }}</span>
   <form method="post" action="/logout"><button class="link">خروج</button></form>

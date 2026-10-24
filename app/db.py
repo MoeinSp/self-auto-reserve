@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
+    is_admin INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL
 );
 -- Credentials for the university site; multiple allowed per panel user.
@@ -91,6 +92,7 @@ MIGRATIONS = [
     ("accounts", "display_name", "TEXT NOT NULL DEFAULT ''"),
     ("accounts", "created_at", "REAL NOT NULL DEFAULT 0"),
     ("menus", "account_id", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -135,6 +137,17 @@ def init() -> None:
             SET account_id = (SELECT id FROM accounts WHERE accounts.user_id = jobs.user_id ORDER BY id LIMIT 1)
             WHERE account_id IS NULL OR account_id = 0
         """)
+
+        # Ensure first user is admin
+        c.execute("UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users WHERE username != 'admin')")
+
+        # Create default admin user if 'admin' does not exist
+        if not c.execute("SELECT 1 FROM users WHERE username = 'admin'").fetchone():
+            from . import security
+            c.execute(
+                "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, 1, ?)",
+                ("admin", security.hash_password("Admin@Self2026"), time.time()),
+            )
 
 
 def count_attempt(job_id: int, message: str) -> int:
