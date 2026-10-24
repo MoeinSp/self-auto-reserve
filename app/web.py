@@ -331,10 +331,20 @@ async def fetch_menu(
     return _back(f"/?account={account_id}")
 
 
-def _picked_foods(uid: int, menu_date: str, picks: list[str]) -> dict[str, list[str]]:
+def _picked_foods(uid: int, menu_date: str, picks: list[str], account_id: int = 0) -> dict[str, list[str]]:
     """Map ticked "meal_index:food_index" boxes back to {meal: [food, ...]}."""
     with db.tx() as c:
-        row = c.execute("SELECT data FROM menus WHERE user_id = ? AND date = ? ORDER BY fetched_at DESC LIMIT 1", (uid, menu_date)).fetchone()
+        row = None
+        if account_id:
+            row = c.execute(
+                "SELECT data FROM menus WHERE user_id = ? AND account_id = ? AND date = ? ORDER BY fetched_at DESC LIMIT 1",
+                (uid, account_id, menu_date),
+            ).fetchone()
+        if not row:
+            row = c.execute(
+                "SELECT data FROM menus WHERE user_id = ? AND date = ? ORDER BY fetched_at DESC LIMIT 1",
+                (uid, menu_date),
+            ).fetchone()
     if not row:
         return {}
     meals = list(json.loads(row["data"]).items())
@@ -381,7 +391,7 @@ def create_job(
 
     if picks and menu_date:
         day = menu_date
-        wanted = [(m, "\n".join(f)) for m, f in _picked_foods(uid, menu_date, picks).items()]
+        wanted = [(m, "\n".join(f)) for m, f in _picked_foods(uid, menu_date, picks, account_id=account_id).items()]
     else:
         day = jalali.normalize_date(date)
         wanted = [(meal if meal in MEALS else "", foods.strip())] if parse_foods(foods) else []

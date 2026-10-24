@@ -126,6 +126,35 @@ def init() -> None:
             c.execute("DROP TABLE accounts")
             c.execute("ALTER TABLE accounts_migrated RENAME TO accounts")
 
+        # Check if old menus table has PRIMARY KEY without account_id
+        menu_info = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='menus'").fetchone()
+        if menu_info:
+            pk_cols = [r["name"] for r in sorted(c.execute("PRAGMA table_info(menus)").fetchall(), key=lambda r: r["pk"]) if r["pk"] > 0]
+            if "account_id" not in pk_cols:
+                c.execute("""
+                    CREATE TABLE menus_migrated (
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        account_id INTEGER NOT NULL DEFAULT 0,
+                        date TEXT NOT NULL,
+                        data TEXT NOT NULL,
+                        fetched_at REAL NOT NULL,
+                        PRIMARY KEY (user_id, account_id, date)
+                    )
+                """)
+                menu_cols = {r["name"] for r in c.execute("PRAGMA table_info(menus)")}
+                if "account_id" in menu_cols:
+                    c.execute("""
+                        INSERT OR IGNORE INTO menus_migrated (user_id, account_id, date, data, fetched_at)
+                        SELECT user_id, COALESCE(account_id, 0), date, data, fetched_at FROM menus
+                    """)
+                else:
+                    c.execute("""
+                        INSERT OR IGNORE INTO menus_migrated (user_id, account_id, date, data, fetched_at)
+                        SELECT user_id, 0, date, data, fetched_at FROM menus
+                    """)
+                c.execute("DROP TABLE menus")
+                c.execute("ALTER TABLE menus_migrated RENAME TO menus")
+
         c.executescript(SCHEMA)
         for table, column, definition in MIGRATIONS:
             if column not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
@@ -135,6 +164,13 @@ def init() -> None:
         c.execute("""
             UPDATE jobs
             SET account_id = (SELECT id FROM accounts WHERE accounts.user_id = jobs.user_id ORDER BY id LIMIT 1)
+            WHERE account_id IS NULL OR account_id = 0
+        """)
+
+        # Update existing menus without an account_id
+        c.execute("""
+            UPDATE menus
+            SET account_id = (SELECT id FROM accounts WHERE accounts.user_id = menus.user_id ORDER BY id LIMIT 1)
             WHERE account_id IS NULL OR account_id = 0
         """)
 

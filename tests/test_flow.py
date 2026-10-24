@@ -332,6 +332,55 @@ class UnitTest(unittest.TestCase):
         res_denied = web.admin_page(req_non_admin)
         self.assertEqual(res_denied.status_code, 303)
 
+    def test_menus_schema_migration_and_upsert(self):
+        import json, time
+        from app import db
+
+        with db.tx() as c:
+            # Recreate old menus schema with PRIMARY KEY (user_id, date)
+            c.execute("DROP TABLE IF EXISTS menus")
+            c.execute("""
+                CREATE TABLE menus (
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    date TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    fetched_at REAL NOT NULL,
+                    PRIMARY KEY (user_id, date)
+                )
+            """)
+            c.execute(
+                "INSERT INTO menus (user_id, date, data, fetched_at) VALUES (1, '1405/08/02', '{}', 100)"
+            )
+
+        # Run init to trigger migration
+        db.init()
+
+        # Check that table has new primary key and ON CONFLICT works for different accounts
+        with db.tx() as c:
+            pk_cols = [r["name"] for r in sorted(c.execute("PRAGMA table_info(menus)").fetchall(), key=lambda r: r["pk"]) if r["pk"] > 0]
+            self.assertIn("account_id", pk_cols)
+
+            # Insert for account 1
+            menu_data1 = json.dumps({"ناهار": {"foods": ["قیمه"]}})
+            c.execute(
+                "INSERT INTO menus (user_id, account_id, date, data, fetched_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(user_id, account_id, date) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at",
+                (1, 1, '1405/08/02', menu_data1, time.time())
+            )
+
+            # Insert for account 2 (same user, same date, different account)
+            menu_data2 = json.dumps({"ناهار": {"foods": ["قورمه سبزی"]}})
+            c.execute(
+                "INSERT INTO menus (user_id, account_id, date, data, fetched_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(user_id, account_id, date) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at",
+                (1, 2, '1405/08/02', menu_data2, time.time())
+            )
+
+            row1 = c.execute("SELECT data FROM menus WHERE user_id = 1 AND account_id = 1 AND date = '1405/08/02'").fetchone()
+            row2 = c.execute("SELECT data FROM menus WHERE user_id = 1 AND account_id = 2 AND date = '1405/08/02'").fetchone()
+            self.assertIn("قیمه", row1["data"])
+            self.assertIn("قورمه سبزی", row2["data"])
+
 
 if __name__ == "__main__":
     unittest.main()
