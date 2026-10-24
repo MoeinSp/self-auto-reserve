@@ -30,15 +30,17 @@
 سرور باید به `nut.uk.ac.ir` دسترسی داشته باشد (احتمالاً یعنی سرور داخل ایران باشد).
 اول روی سرور امتحان کن: `curl -I https://nut.uk.ac.ir/`
 
-### با Docker
+### با Docker (پیشنهادی)
 
 ```bash
-git clone <repo> && cd self-auto-reserve
-cp .env.example .env
-python3 -c "import secrets; print(secrets.token_urlsafe(48))"   # → SECRET_KEY در .env
-# یک INVITE_CODE هم بگذار تا فقط دوستانت بتوانند ثبت‌نام کنند
-docker compose up -d --build
+git clone -b claude/quirky-allen-m13ndg https://github.com/MoeinSp/self-auto-reserve
+cd self-auto-reserve
+./docker.sh              # پورت پیش‌فرض 8437؛ برای تغییر: PORT=9000 ./docker.sh
 ```
+
+بار اول `.env` را با `SECRET_KEY` و کد دعوت تصادفی می‌سازد، ایمیج را build و اجرا می‌کند و کد دعوت
+را چاپ می‌کند. برای به‌روزرسانی: `git pull && ./docker.sh`. داده‌ها در `./data` می‌مانند.
+لاگ‌ها: `docker compose logs -f`
 
 ### بدون Docker
 
@@ -69,7 +71,7 @@ ssh -L 8000:127.0.0.1:8000 root@SERVER   # بعد در مرورگر: http://loca
 ```bash
 .venv/bin/python -m tools.dump_pages --date 1405/08/05
 # یا با Docker:
-docker compose run --rm -it app python -m tools.dump_pages --date 1405/08/05
+docker compose exec -it app python -m tools.dump_pages --date 1405/08/05   # خروجی در ./dumps
 ```
 
 خروجی در پوشهٔ `dumps/` ذخیره می‌شود (HTML + اسکرین‌شات + `report.txt`). رمز در آن نیست.

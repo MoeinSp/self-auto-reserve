@@ -1,9 +1,14 @@
 services:
   app:
     build: .
+    container_name: self-auto-reserve
     env_file: .env
     ports:
-      - "127.0.0.1:8000:8000"
+      # Panel is only reachable from the server itself (use an SSH tunnel).
+      - "127.0.0.1:${PORT:-8437}:8000"
     volumes:
       - ./data:/data
+      - ./dumps:/app/dumps
+    shm_size: 512mb # Chromium needs more than Docker's default 64 MB
+    init: true
     restart: unless-stopped
