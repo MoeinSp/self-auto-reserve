@@ -71,6 +71,7 @@
         <span class="acc-info">
           <strong>{{ acc.display_name or acc.site_username }}</strong>
           {% if acc.display_name %}<small>{{ acc.site_username }}</small>{% endif %}
+          {% if acc.credit %}<span class="chip-credit">💳 {{ acc.credit }}</span>{% endif %}
         </span>
         {% if active_account and acc.id == active_account.id and active_id != 'new' %}
           <span class="acc-check">✓</span>
@@ -82,6 +83,37 @@
     </a>
   </div>
 </div>
+
+{% if active_account and active_id != 'new' %}
+<div class="account-finance-bar">
+  <div class="finance-info">
+    <div class="finance-title">
+      <span>💳 اعتبار حساب سلف:</span>
+      <strong class="credit-amount">
+        {% if active_account.credit %}
+          {{ active_account.credit }}
+        {% else %}
+          <span class="muted" style="font-size:14px;font-weight:normal">هنوز استعلام نشده</span>
+        {% endif %}
+      </strong>
+    </div>
+    {% if active_account.credit_updated_at %}
+      <div class="finance-time">آخرین استعلام: {{ active_account.credit_updated_at|ts }}</div>
+    {% endif %}
+  </div>
+  <div class="finance-actions">
+    <form method="post" action="/account/sync-credit" style="display:inline">
+      <input type="hidden" name="account_id" value="{{ active_account.id }}">
+      <button class="secondary small-btn" {% if op and op.state == 'running' %}disabled{% endif %}>
+        🔄 استعلام موجودی
+      </button>
+    </form>
+    <a href="https://nut.uk.ac.ir/ePay/ePay_Payment.aspx" target="_blank" rel="noopener noreferrer" class="charge-btn">
+      💳 شارژ کیف پول (افزایش اعتبار سلف) ↗
+    </a>
+  </div>
+</div>
+{% endif %}
 
 <div class="grid2">
   <section class="card">
@@ -158,12 +190,30 @@
       {% endif %}
 
       {% set menu_meal = (menu|list)[0] if menu and menu|length == 1 else '' %}
-      <div class="row">
-        <label>تاریخ <input name="date" value="{{ menu_date or today }}" required placeholder="1405/08/05" dir="ltr"></label>
-        <label>وعده
-          <select name="meal">{% for m in MEALS %}<option value="{{ m }}"{% if m and m == menu_meal %} selected{% endif %}>{{ m or 'فرقی نمی‌کند' }}</option>{% endfor %}</select>
-        </label>
-        <button class="secondary" formaction="/menu" formnovalidate {% if op and op.state == 'running' %}disabled{% endif %}>پیدا کردن غذاها</button>
+      <div class="date-picker-block">
+        <div class="date-label-row">
+          <label>انتخاب روز و تقویم:</label>
+          <span class="selected-weekday-badge" id="selectedDateBadge">{{ jalali.format_jalali_short(menu_date or today) }}</span>
+        </div>
+        <div class="date-pills">
+          {% for d in upcoming_days %}
+            <button type="button" class="date-pill {% if (menu_date and d.date == menu_date) or (not menu_date and d.is_today) %}selected{% endif %}"
+                    onclick="selectDate('{{ d.date }}', '{{ d.short_label }}', this)">
+              <span class="pill-day">{{ d.day_name }}</span>
+              <span class="pill-date">{{ d.date[5:] }}</span>
+              {% if d.is_today %}<span class="pill-tag">امروز</span>{% endif %}
+            </button>
+          {% endfor %}
+        </div>
+        <div class="row">
+          <label>تاریخ (جلالی)
+            <input id="mainDateInput" name="date" value="{{ menu_date or today }}" required placeholder="1405/08/05" dir="ltr" onchange="updateDateBadge(this.value)">
+          </label>
+          <label>وعده
+            <select name="meal">{% for m in MEALS %}<option value="{{ m }}"{% if m and m == menu_meal %} selected{% endif %}>{{ m or 'فرقی نمی‌کند' }}</option>{% endfor %}</select>
+          </label>
+          <button class="secondary" formaction="/menu" formnovalidate {% if op and op.state == 'running' %}disabled{% endif %}>پیدا کردن غذاها</button>
+        </div>
       </div>
 
       {% if menu %}
@@ -212,7 +262,84 @@
   </section>
 </div>
 
-<section class="card">
+<div class="grid2" style="margin-top:20px">
+  <!-- Weekly Auto-Reserve Card -->
+  <section class="card auto-reserve-card">
+    <div class="card-head">
+      <span class="step">۳</span>
+      <h2>رزرو خودکار هفتگی (هر چهارشنبه)</h2>
+    </div>
+    <p class="muted small">هر چهارشنبه به محض باز شدن سامانه برای هفتهٔ بعد، ربات تمام روزها (از شنبه تا چهارشنبه) را برای وعده‌های انتخابی به ترتیب ثبت می‌کند.</p>
+    {% if active_account and active_id != 'new' %}
+      <form method="post" action="/account/auto-reserve">
+        <input type="hidden" name="account_id" value="{{ active_account.id }}">
+        <div class="auto-reserve-toggle">
+          <label class="switch-label">
+            <input type="checkbox" name="auto_reserve" value="1" {% if active_account.auto_reserve %}checked{% endif %} onchange="this.form.submit()">
+            <span class="switch-text"><strong>فعال‌سازی رزرو خودکار در چهارشنبه‌ها</strong></span>
+          </label>
+        </div>
+        <div class="meals-row">
+          <span class="muted small">وعده‌ها:</span>
+          {% set cur_meals = (active_account.auto_reserve_meals or 'ناهار,شام').split(',') %}
+          <label class="pick-inline"><input type="checkbox" name="meals" value="صبحانه" {% if 'صبحانه' in cur_meals %}checked{% endif %}><span>صبحانه</span></label>
+          <label class="pick-inline"><input type="checkbox" name="meals" value="ناهار" {% if 'ناهار' in cur_meals %}checked{% endif %}><span>ناهار</span></label>
+          <label class="pick-inline"><input type="checkbox" name="meals" value="شام" {% if 'شام' in cur_meals %}checked{% endif %}><span>شام</span></label>
+          <button class="secondary small-btn" style="margin-right:auto">ذخیره وعده‌ها</button>
+        </div>
+        <div class="auto-reserve-footer">
+          {% if active_account.last_auto_reserve %}
+            <span class="muted small">آخرین اجرا: هفته {{ active_account.last_auto_reserve }}</span>
+          {% else %}
+            <span class="muted small">آماده برای اجرای چهارشنبه</span>
+          {% endif %}
+          <button class="secondary small-btn" formaction="/account/auto-reserve/run-now" formnovalidate {% if op and op.state == 'running' %}disabled{% endif %}>
+            🚀 اجرای فوری رزرو خودکار هفته بعد
+          </button>
+        </div>
+      </form>
+    {% else %}
+      <div class="empty">ابتدا یک حساب انتخاب یا ثبت کن.</div>
+    {% endif %}
+  </section>
+
+  <!-- Forgot Receipt Card -->
+  <section class="card forgot-receipt-card">
+    <div class="card-head">
+      <span class="step">۴</span>
+      <h2>دریافت فیش فراموشی کارت</h2>
+    </div>
+    <p class="muted small">اگر کارت دانشجویی همراهت نیست، روز و وعده را انتخاب کن تا کد یا بارکد فیش فراموشی صادر شود.</p>
+    {% if active_account and active_id != 'new' %}
+      <form method="post" action="/forgot-receipt">
+        <input type="hidden" name="account_id" value="{{ active_account.id }}">
+        <label>روز مورد نظر:
+          <select name="date">
+            {% for d in upcoming_days[:7] %}
+              <option value="{{ d.date }}" {% if d.is_today %}selected{% endif %}>{{ d.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <div class="row">
+          <label>وعده غذایی:
+            <select name="meal">
+              <option value="ناهار" selected>ناهار</option>
+              <option value="شام">شام</option>
+              <option value="صبحانه">صبحانه</option>
+            </select>
+          </label>
+          <button class="primary" {% if op and op.state == 'running' %}disabled{% endif %} style="margin-top:auto">
+            🎫 دریافت کد فیش
+          </button>
+        </div>
+      </form>
+    {% else %}
+      <div class="empty">ابتدا یک حساب انتخاب یا ثبت کن.</div>
+    {% endif %}
+  </section>
+</div>
+
+<section class="card" style="margin-top:20px">
   <div class="card-head">
     <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg></span>
     <h2>کارها</h2>
@@ -222,7 +349,11 @@
   <div class="jobs">
     {% for j in jobs %}
     <div class="job">
-      <div class="job-date"><b>{{ j.date }}</b><span>{{ j.meal or 'هر وعده' }}</span></div>
+      <div class="job-date">
+        <b>{{ jalali.format_jalali_short(j.date) }}</b>
+        <span>{{ j.meal or 'هر وعده' }}</span>
+        <small class="muted" dir="ltr">{{ j.date }}</small>
+      </div>
       <div>
         <div class="job-foods">
           <span class="job-acc-chip">👤 {{ j.account_name or j.site_username or 'سلف' }}</span>
@@ -263,4 +394,22 @@
     {% for l in logs %}<li class="{{ l.level }}"><time>{{ l.created_at|ts }}</time><span class="msg" title="{{ l.message }}">{{ l.message }}</span></li>{% endfor %}
   </ul>
 </section>
+
+<script>
+function selectDate(dateVal, labelText, btnEl) {
+  var input = document.getElementById('mainDateInput');
+  if (input) {
+    input.value = dateVal;
+    input.dispatchEvent(new Event('change'));
+  }
+  var badge = document.getElementById('selectedDateBadge');
+  if (badge) badge.innerText = labelText + ' (' + dateVal + ')';
+  document.querySelectorAll('.date-pill').forEach(function(el) { el.classList.remove('selected'); });
+  if (btnEl) btnEl.classList.add('selected');
+}
+function updateDateBadge(dateVal) {
+  var badge = document.getElementById('selectedDateBadge');
+  if (badge) badge.innerText = dateVal;
+}
+</script>
 {% endblock %}

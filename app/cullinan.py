@@ -309,12 +309,16 @@ class CullinanClient:
             except Exception:
                 pass
         credit = ""
-        try:
-            loc = page.locator("#lblCredit, [id$='lblCredit']").first
-            if await loc.count() > 0:
-                credit = norm(await loc.inner_text())
-        except Exception:
-            pass
+        for sel in ("#lblCredit", "[id$='lblCredit']", "#lblMojoodi", "[id$='lblMojoodi']", ".credit", "[id*='Credit' i]"):
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0:
+                    val = norm(await loc.inner_text()).strip()
+                    if val and (any(ch.isdigit() for ch in val) or "ریال" in val or "تومان" in val):
+                        credit = val
+                        break
+            except Exception:
+                pass
         if name:
             self.display_name = name
         return {"name": name, "credit": credit}
@@ -519,6 +523,156 @@ class CullinanClient:
         """Foods and reservation of `date`, per meal (only `meal` if given)."""
         day = (await self.read_week(date)).get(date, {})
         return {m: info for m, info in day.items() if not meal or matches(m, meal)}
+
+    async def auto_reserve_week(self, target_date: str, wanted_meals: list[str]) -> list[str]:
+        """Automatically reserve meals for the week containing `target_date`.
+        Processes meals in order (e.g. صبحانه, ناهار, شام) and days in order (شنبه تا چهارشنبه).
+        Clicks the respective save button for each meal.
+        """
+        page = await self._open(RESERVATION_PATH)
+        for _ in range(4):
+            label = norm(await self._text(page, SEL["week_label"]))
+            days = DATE_RE.findall(label)
+            if len(days) < 2:
+                raise SiteError("بازهٔ هفته در صفحهٔ رزرو پیدا نشد")
+            if days[0] <= target_date <= days[-1]:
+                break
+            arrow = page.locator(SEL["week_next"] if target_date > days[-1] else SEL["week_prev"]).first
+            if await arrow.count() == 0:
+                raise SiteError("دکمهٔ هفتهٔ بعد/قبل در صفحهٔ رزرو پیدا نشد")
+            await self.throttle.wait(step=True)
+            await self._postback(page, arrow.click)
+        else:
+            raise SiteError(f"هفتهٔ {target_date} در صفحهٔ رزرو در دسترس نیست")
+
+        results = []
+        save_buttons = {
+            "صبحانه": "#cphMain_btnSaveBreakfast, [id$='btnSaveBreakfast']",
+            "ناهار": "#cphMain_btnSaveLunch, [id$='btnSaveLunch']",
+            "شام": "#cphMain_btnSaveDinner, [id$='btnSaveDinner']",
+        }
+
+        # Process each meal in order (صبحانه, ناهار, شام)
+        for meal in ["صبحانه", "ناهار", "شام"]:
+            if wanted_meals and meal not in wanted_meals:
+                continue
+            suffix = WEEK_GRIDS.get(meal)
+            if not suffix:
+                continue
+            grid_sel = f"[id$='grdReservation{suffix}']"
+            rows = await self._rows(page, grid_sel) or []
+            if not rows:
+                continue
+
+            changed = False
+            for idx, row in enumerate(rows):
+                day_m = DATE_RE.search(norm(row["label"]))
+                day_str = day_m.group(0) if day_m else f"روز {idx+1}"
+                check = row["check"]
+
+                if check["checked"] or "رزرو شده" in row["status"]:
+                    chosen = next((o for o in _real_options(row["food"]) if o["selected"]), None)
+                    c_name = food_name(chosen["text"]) if chosen else "غذا"
+                    results.append(f"✓ {day_str} ({meal}): از قبل رزرو شده («{c_name}»)")
+                    continue
+
+                if check["disabled"]:
+                    continue
+
+                foods = _real_options(row["food"])
+                if not foods:
+                    continue
+
+                first_food = foods[0]
+                if not first_food["selected"]:
+                    await self._select(page, row["food"], first_food["value"])
+                    rows = await self._rows(page, grid_sel) or []
+                    if idx < len(rows):
+                        check = rows[idx]["check"]
+
+                if not check["disabled"] and not check["checked"]:
+                    await page.locator(_css(check)).check()
+                    changed = True
+                    results.append(f"★ {day_str} ({meal}): ثبت شد («{food_name(first_food['text'])}»)")
+
+            if changed:
+                btn_sel = save_buttons.get(meal)
+                save_btn = page.locator(btn_sel).first if btn_sel else None
+                if save_btn and await save_btn.count() > 0:
+                    await self.throttle.wait(step=True)
+                    await self._postback(page, save_btn.click)
+                    msg = norm(" ".join(self.dialogs[-1:]) + " " + await self._text(page, SEL["page_message"]))
+                    if msg:
+                        results.append(f"پیام سامانه برای {meal}: {msg}")
+
+        return results
+
+    async def get_forgot_receipt(self, date: str, meal: str = "") -> dict:
+        """Fetch forgot card receipt code from Reservation/ForgotReceipt.aspx."""
+        page = await self._open("Reservation/ForgotReceipt.aspx")
+
+        # 1) Date input
+        date_input = page.locator("[id$='txtDate'], input[name*='txtDate']").first
+        if await date_input.count() > 0:
+            val = norm(await date_input.input_value())
+            if val != date:
+                await date_input.fill(date)
+                go_btn = page.locator("[id$='imgbtnGoToDate'], [id*='GoToDate']").first
+                if await go_btn.count() > 0:
+                    await self.throttle.wait(step=True)
+                    await self._postback(page, go_btn.click)
+
+        # 2) Meal dropdown
+        for meal_sel in ("[id$='drpFoodType']", "[id$='drpMeal']", "select[name*='Meal']"):
+            loc = page.locator(meal_sel).first
+            if await loc.count() > 0:
+                opts = [norm(t) for t in await loc.locator("option").all_inner_texts()]
+                for o in opts:
+                    if meal and (meal in o or o in meal):
+                        await loc.select_option(label=o)
+                        break
+
+        # 3) Submit / row button
+        row_btn = page.locator("input[value*='فیش'], button:has-text('فیش'), a:has-text('فیش')").first
+        if await row_btn.count() > 0:
+            await self.throttle.wait(step=True)
+            await self._postback(page, row_btn.click)
+        else:
+            submit_btn = page.locator("[id$='btnSave'], [id$='btnShow'], [id$='btnReceipt'], input[type=submit]").first
+            if await submit_btn.count() > 0:
+                await self.throttle.wait(step=True)
+                await self._postback(page, submit_btn.click)
+
+        # 4) Extract receipt code
+        body_text = norm(await page.inner_text("body"))
+        code = ""
+        for code_sel in ("[id$='lblBarcode']", "[id$='lblReceiptCode']", "[id$='lblFish']", "[id$='lblCode']", ".receipt-code"):
+            loc = page.locator(code_sel).first
+            if await loc.count() > 0:
+                c_text = norm(await loc.inner_text()).strip()
+                if c_text and any(ch.isdigit() for ch in c_text):
+                    code = c_text
+                    break
+
+        if not code:
+            patterns = [
+                r"(?:کد|شماره)\s*(?:فیش|فراموشی|ژتون|بارکد)\s*[:=\-]?\s*(\d{4,12})",
+                r"(\d{5,10})",
+            ]
+            for pat in patterns:
+                m = re.search(pat, body_text)
+                if m:
+                    code = m.group(1)
+                    break
+
+        page_msg = norm(" ".join(self.dialogs[-2:]) + " " + await self._text(page, SEL["page_message"]))
+        return {
+            "success": bool(code),
+            "code": code,
+            "message": page_msg or ("کد فیش دریافت شد" if code else "فیشی برای این تاریخ یا وعده صادر نشد یا رزروی موجود نیست"),
+            "date": date,
+            "meal": meal,
+        }
 
 
 async def launch_browser(playwright) -> Browser:

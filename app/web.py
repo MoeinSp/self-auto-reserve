@@ -170,6 +170,9 @@ def dashboard(request: Request):
         op=worker.ops.get(uid), now=time.time(),
         menu=menu, menu_date=menu_row["date"] if menu_row else None,
         menu_at=menu_row["fetched_at"] if menu_row else None,
+        upcoming_days=jalali.get_upcoming_days(14),
+        next_week_days=jalali.get_next_week_days(),
+        jalali=jalali,
     )
 
 
@@ -299,6 +302,88 @@ def delete_account(request: Request, account_id: int = Form(...)):
         task.cancel()
     request.session.pop("active_account_id", None)
     return _back("/", f"حساب «{name}» حذف شد.", request)
+
+
+@app.post("/account/sync-credit")
+async def sync_credit(request: Request, account_id: int = Form(...)):
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    account_id = int(account_id) if str(account_id).isdigit() else 0
+    with db.tx() as c:
+        acc = c.execute("SELECT id FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
+    if not acc:
+        return _back("/", "حساب پیدا نشد.", request)
+    request.session["active_account_id"] = account_id
+    if not worker.sync_account_profile(uid, account_id):
+        return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+    return _back(f"/?account={account_id}")
+
+
+@app.post("/account/auto-reserve")
+def save_auto_reserve(
+    request: Request,
+    account_id: int = Form(...),
+    auto_reserve: str = Form(""),
+    meals: list[str] = Form([]),
+):
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    account_id = int(account_id) if str(account_id).isdigit() else 0
+    is_active = 1 if auto_reserve in ("1", "true", "on") else 0
+    valid_meals = [m for m in meals if m in MEALS]
+    meals_str = ",".join(valid_meals) if valid_meals else "ناهار,شام"
+    with db.tx() as c:
+        acc = c.execute("SELECT id, display_name FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
+        if not acc:
+            return _back("/", "حساب پیدا نشد.", request)
+        c.execute(
+            "UPDATE accounts SET auto_reserve = ?, auto_reserve_meals = ? WHERE id = ?",
+            (is_active, meals_str, account_id),
+        )
+    status_str = "فعال شد (چهارشنبه‌ها برای هفته بعد)" if is_active else "غیرفعال شد"
+    return _back(f"/?account={account_id}", f"تنظیمات رزرو خودکار هفتگی {status_str}.", request)
+
+
+@app.post("/account/auto-reserve/run-now")
+async def run_auto_reserve_now(request: Request, account_id: int = Form(...)):
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    account_id = int(account_id) if str(account_id).isdigit() else 0
+    with db.tx() as c:
+        acc = c.execute("SELECT id FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
+    if not acc:
+        return _back("/", "حساب پیدا نشد.", request)
+    request.session["active_account_id"] = account_id
+    if not worker.run_auto_reserve(uid, account_id):
+        return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+    return _back(f"/?account={account_id}")
+
+
+@app.post("/forgot-receipt")
+async def get_forgot_receipt_endpoint(
+    request: Request,
+    account_id: int = Form(...),
+    date: str = Form(...),
+    meal: str = Form(""),
+):
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    account_id = int(account_id) if str(account_id).isdigit() else 0
+    day = jalali.normalize_date(date)
+    if not day:
+        return _back(f"/?account={account_id}", "تاریخ را انتخاب کن.", request)
+    with db.tx() as c:
+        acc = c.execute("SELECT id FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
+    if not acc:
+        return _back("/", "حساب پیدا نشد.", request)
+    request.session["active_account_id"] = account_id
+    if not worker.fetch_forgot_receipt(uid, account_id, day, meal if meal in MEALS else ""):
+        return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+    return _back(f"/?account={account_id}")
 
 
 @app.post("/menu")

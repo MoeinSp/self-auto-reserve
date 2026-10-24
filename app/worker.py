@@ -91,6 +91,23 @@ class Worker:
                     task = self.tasks.get(aid)
                     if task is None or task.done():
                         self.tasks[aid] = asyncio.create_task(self._run_account(aid))
+
+                # Check weekly auto-reserve on Wednesdays
+                today_str = jalali.today_str()
+                if jalali.weekday_name(today_str) == "چهارشنبه":
+                    next_week = jalali.get_next_week_days()
+                    if next_week:
+                        target_week = next_week[0]["date"]
+                        with db.tx() as c:
+                            auto_accounts = c.execute(
+                                "SELECT * FROM accounts WHERE auto_reserve = 1 AND (last_auto_reserve != ? OR last_auto_reserve IS NULL)",
+                                (target_week,),
+                            ).fetchall()
+                        for acc_row in auto_accounts:
+                            aid = acc_row["id"]
+                            uid = acc_row["user_id"]
+                            if uid not in self.ops or self.ops[uid].get("state") != "running":
+                                self.run_auto_reserve(uid, aid, target_week)
             except Exception:
                 log.exception("supervisor error")
             await asyncio.sleep(5)
@@ -196,14 +213,76 @@ class Worker:
             await client.login()
             profile = await client.read_profile()
             name = profile.get("name") or client.username
-            if name:
-                with db.tx() as c:
-                    c.execute("UPDATE accounts SET display_name = ? WHERE id = ?", (name, account_id))
+            credit = profile.get("credit", "")
+            with db.tx() as c:
+                c.execute(
+                    "UPDATE accounts SET display_name = ?, credit = ?, credit_updated_at = ? WHERE id = ?",
+                    (name or "", credit, time.time(), account_id),
+                )
             tries = f"، کپچا در تلاش {client.captcha_attempts} حل شد" if client.captcha_attempts > 1 else ""
-            credit_str = f" · اعتبار: {profile['credit']}" if profile.get("credit") else ""
+            credit_str = f" · اعتبار سلف: {credit}" if credit else ""
             return f"ورود موفق بود. نام در سامانه: «{name}» ({time.monotonic() - started:.0f} ثانیه{tries}{credit_str})."
 
         return self.start_op(user_id, "تست ورود", run, account_id=account_id)
+
+    def sync_account_profile(self, user_id: int, account_id: int) -> bool:
+        async def run(client: CullinanClient) -> str:
+            started = time.monotonic()
+            await client.login()
+            profile = await client.read_profile()
+            name = profile.get("name") or client.username
+            credit = profile.get("credit", "")
+            with db.tx() as c:
+                c.execute(
+                    "UPDATE accounts SET display_name = ?, credit = ?, credit_updated_at = ? WHERE id = ?",
+                    (name or "", credit, time.time(), account_id),
+                )
+            if credit:
+                return f"موجودی سلف «{name}» استعلام شد: {credit} ({time.monotonic() - started:.0f} ثانیه)."
+            return f"اطلاعات حساب «{name}» به‌روزرسانی شد ({time.monotonic() - started:.0f} ثانیه)."
+
+        return self.start_op(user_id, "استعلام موجودی سلف", run, account_id=account_id)
+
+    def fetch_forgot_receipt(self, user_id: int, account_id: int, date: str, meal: str) -> bool:
+        async def run(client: CullinanClient) -> str:
+            started = time.monotonic()
+            await client.login()
+            res = await client.get_forgot_receipt(date, meal)
+            day_name = jalali.weekday_name(date)
+            date_label = f"{day_name} {date}" if day_name else date
+            meal_label = f"وعدهٔ {meal}" if meal else "وعده انتخابی"
+            if res.get("code"):
+                code = res["code"]
+                msg = f"کد فیش فراموشی برای {meal_label} ({date_label}): {code}"
+                db.log(user_id, f"🎫 {msg}", "info")
+                return msg
+            err_msg = res.get("message") or "فیش فراموشی صادر نشد"
+            return f"دریافت فیش برای {meal_label} ({date_label}) ناموفق: {err_msg}"
+
+        return self.start_op(user_id, "دریافت فیش فراموشی", run, account_id=account_id)
+
+    def run_auto_reserve(self, user_id: int, account_id: int, target_week_date: str = "") -> bool:
+        async def run(client: CullinanClient) -> str:
+            await client.login()
+            with db.tx() as c:
+                acc = c.execute("SELECT auto_reserve_meals FROM accounts WHERE id = ?", (account_id,)).fetchone()
+            meals_str = acc["auto_reserve_meals"] if acc and acc["auto_reserve_meals"] else "ناهار,شام"
+            meals = [m.strip() for m in meals_str.split(",") if m.strip()]
+
+            target = target_week_date
+            if not target:
+                next_week = jalali.get_next_week_days()
+                target = next_week[0]["date"] if next_week else jalali.today_str()
+
+            results = await client.auto_reserve_week(target, meals)
+            with db.tx() as c:
+                c.execute("UPDATE accounts SET last_auto_reserve = ? WHERE id = ?", (target, account_id))
+
+            summary = "؛ ".join(results) if results else "موردی برای رزرو جدید پیدا نشد یا تمام وعده‌ها از قبل رزرو شده بودند."
+            db.log(user_id, f"🤖 رزرو خودکار هفته {target}: {summary}", "info")
+            return f"رزرو خودکار هفته {target} انجام شد: {summary}"
+
+        return self.start_op(user_id, "رزرو خودکار هفته بعد", run, account_id=account_id)
 
     def fetch_menu(self, user_id: int, account_id: int, date: str, meal: str = "") -> bool:
         async def run(client: CullinanClient) -> str:

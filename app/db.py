@@ -20,6 +20,11 @@ CREATE TABLE IF NOT EXISTS accounts (
     site_username TEXT NOT NULL,
     site_password_enc TEXT NOT NULL,
     display_name TEXT NOT NULL DEFAULT '',
+    credit TEXT NOT NULL DEFAULT '',
+    credit_updated_at REAL NOT NULL DEFAULT 0,
+    auto_reserve INTEGER NOT NULL DEFAULT 0,
+    auto_reserve_meals TEXT NOT NULL DEFAULT 'ناهار,شام',
+    last_auto_reserve TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0,
     UNIQUE (user_id, site_username)
 );
@@ -90,6 +95,11 @@ MIGRATIONS = [
     ("jobs", "skip_if_reserved", "INTEGER NOT NULL DEFAULT 1"),
     ("jobs", "account_id", "INTEGER REFERENCES accounts(id) ON DELETE CASCADE"),
     ("accounts", "display_name", "TEXT NOT NULL DEFAULT ''"),
+    ("accounts", "credit", "TEXT NOT NULL DEFAULT ''"),
+    ("accounts", "credit_updated_at", "REAL NOT NULL DEFAULT 0"),
+    ("accounts", "auto_reserve", "INTEGER NOT NULL DEFAULT 0"),
+    ("accounts", "auto_reserve_meals", "TEXT NOT NULL DEFAULT 'ناهار,شام'"),
+    ("accounts", "last_auto_reserve", "TEXT NOT NULL DEFAULT ''"),
     ("accounts", "created_at", "REAL NOT NULL DEFAULT 0"),
     ("menus", "account_id", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),

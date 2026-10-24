@@ -15,7 +15,10 @@ os.environ.setdefault("DATA_DIR", tempfile.mkdtemp())
 import uvicorn  # noqa: E402
 from playwright.async_api import async_playwright  # noqa: E402
 
-from app import config  # noqa: E402
+from pathlib import Path
+from app import config, db  # noqa: E402
+config.DB_PATH = Path(tempfile.mkdtemp()) / "test.db"
+db.init()
 from app.cullinan import CullinanClient, Job, LoginFailed, launch_browser  # noqa: E402
 from app.jalali import normalize_date, to_jalali  # noqa: E402
 from app.ratelimit import Throttle  # noqa: E402
@@ -263,6 +266,9 @@ class UnitTest(unittest.TestCase):
 
         self.assertTrue(inspect.iscoroutinefunction(web.test_account))
         self.assertTrue(inspect.iscoroutinefunction(web.fetch_menu))
+        self.assertTrue(inspect.iscoroutinefunction(web.sync_credit))
+        self.assertTrue(inspect.iscoroutinefunction(web.run_auto_reserve_now))
+        self.assertTrue(inspect.iscoroutinefunction(web.get_forgot_receipt_endpoint))
 
     def test_floor(self):
         self.assertGreaterEqual(Throttle(min_interval=0.1).min_interval, config.MIN_POLL_FLOOR)
@@ -381,6 +387,54 @@ class UnitTest(unittest.TestCase):
             row2 = c.execute("SELECT data FROM menus WHERE user_id = 1 AND account_id = 2 AND date = '1405/08/02'").fetchone()
             self.assertIn("قیمه", json.loads(row1["data"])["ناهار"]["foods"])
             self.assertIn("قورمه سبزی", json.loads(row2["data"])["ناهار"]["foods"])
+
+    def test_jalali_calendar_and_weekdays(self):
+        from app import jalali
+
+        self.assertEqual(jalali.weekday_name("1405/08/02"), "شنبه")
+        self.assertEqual(jalali.weekday_name("1405/08/03"), "یکشنبه")
+        self.assertEqual(jalali.weekday_name("1405/08/06"), "چهارشنبه")
+        self.assertIn("شنبه", jalali.format_jalali_full("1405/08/02"))
+        self.assertIn("آبان", jalali.format_jalali_short("1405/08/02"))
+
+        days = jalali.get_upcoming_days(7)
+        self.assertEqual(len(days), 7)
+        self.assertTrue(days[0]["is_today"])
+        self.assertEqual(days[0]["date"], jalali.today_str())
+
+        next_week = jalali.get_next_week_days()
+        self.assertGreaterEqual(len(next_week), 5)
+        self.assertEqual(next_week[0]["day_name"], "شنبه")
+
+    def test_accounts_credit_and_auto_reserve_fields(self):
+        from starlette.requests import Request
+        from app import web, db, config
+
+        config.SECRET_KEY = "test-secret"
+        db.init()
+        with db.tx() as c:
+            c.execute("DELETE FROM accounts")
+            c.execute("DELETE FROM users")
+            c.execute("INSERT INTO users (id, username, password_hash, created_at) VALUES (1, 'tester', 'hash', 0)")
+
+        req = Request({"type": "http", "session": {"uid": 1}, "query_string": b""})
+        web.save_account(req, site_username="40111111", site_password="pass1", display_name="معین")
+
+        with db.tx() as c:
+            acc = c.execute("SELECT * FROM accounts WHERE user_id = 1").fetchone()
+            acc_id = acc["id"]
+            # Test updating credit
+            c.execute("UPDATE accounts SET credit = '3,500,000 ریال', credit_updated_at = 12345 WHERE id = ?", (acc_id,))
+
+        # Test auto-reserve endpoint
+        res = web.save_auto_reserve(req, account_id=acc_id, auto_reserve="1", meals=["ناهار", "شام"])
+        self.assertEqual(res.status_code, 303)
+
+        with db.tx() as c:
+            updated = c.execute("SELECT credit, auto_reserve, auto_reserve_meals FROM accounts WHERE id = ?", (acc_id,)).fetchone()
+            self.assertEqual(updated["credit"], "3,500,000 ریال")
+            self.assertEqual(updated["auto_reserve"], 1)
+            self.assertEqual(updated["auto_reserve_meals"], "ناهار,شام")
 
 
 if __name__ == "__main__":
