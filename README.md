@@ -80,3 +80,15 @@ docker compose run --rm -it app python -m tools.dump_pages --date 1405/08/05
 ```bash
 .venv/bin/python -m unittest tests.test_flow
 ```
+
+## دیپلوی با یک دستور
+
+از کامپیوتر خودت (داخل پوشهٔ پروژه، در لینوکس/مک یا Git Bash ویندوز):
+
+```bash
+./deploy.sh root@SERVER_IP ~/.ssh/YOUR_KEY
+```
+
+کد را روی سرور در `/opt/self-auto-reserve` می‌گذارد و به‌صورت سرویس systemd اجرا می‌کند. دوباره
+اجرا کردنش برنامه را به‌روز می‌کند و `.env` و داده‌ها حفظ می‌شوند. کد دعوت را در خروجی چاپ می‌کند.
+لاگ‌ها: `journalctl -u self-auto-reserve -f`
