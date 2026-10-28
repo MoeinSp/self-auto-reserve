@@ -388,6 +388,7 @@ class UnitTest(unittest.TestCase):
         from app import web
 
         self.assertTrue(inspect.iscoroutinefunction(web.test_account))
+        self.assertTrue(inspect.iscoroutinefunction(web.dashboard))
         self.assertTrue(inspect.iscoroutinefunction(web.refresh_week_menu))
         self.assertTrue(inspect.iscoroutinefunction(web.sync_credit))
         self.assertTrue(inspect.iscoroutinefunction(web.run_auto_reserve_now))
@@ -669,7 +670,7 @@ class UnitTest(unittest.TestCase):
             return Request({"type": "http", "method": "GET", "path": "/", "query_string": query, "headers": [],
                             "session": {"uid": uid}, "scheme": "http", "server": ("test", 80), "root_path": ""})
 
-        page = web.dashboard(req(f"account={aid}".encode()))
+        page = asyncio.run(web.dashboard(req(f"account={aid}".encode())))
         self.assertEqual(page.status_code, 200)
         body = page.body.decode()
         self.assertIn("رزروهای من", body)

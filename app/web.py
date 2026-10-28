@@ -223,7 +223,7 @@ def account_status(acc) -> dict:
 
 # ------------------------------------------------------------- dashboard
 @app.get("/")
-def dashboard(request: Request):
+async def dashboard(request: Request):  # async: it may start a background op
     uid = _uid(request)
     if not uid:
         return _back("/login")
