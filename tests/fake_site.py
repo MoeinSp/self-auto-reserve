@@ -149,6 +149,7 @@ WEEKS = [
 ]
 MENU: dict[str, dict[str, dict]] = {}
 HIDE_GRIDS: set[str] = set()  # grid suffixes left out of the page, e.g. {"Lunch"}
+WEEK_SAVES: list[tuple[str, str]] = []  # (date, meal) reserved with a weekly save button
 
 
 @app.api_route("/Reservation/Reservation.aspx", methods=["GET", "POST"])
@@ -162,8 +163,16 @@ async def reservation(request: Request):
     if "prev.x" in f or "prev" in f:
         week = max(week - 1, 0)
     days = WEEKS[week]
-    grids = ""
     for meal, suffix in zip(MEALS, ("Breakfast", "Lunch", "Dinner")):
+        if f.get(f"btnSave{suffix}"):  # save one meal's ticked days, like the real per-tab buttons
+            for i, day in enumerate(days):
+                info = MENU.get(day, {}).get(meal)
+                if f.get(f"{suffix}chk{i}") and info and info.get("foods") and not info.get("reserved"):
+                    info["reserved"] = info["foods"][0]
+                    WEEK_SAVES.append((day, meal))
+    # Like the real page: a CSS tab strip, one meal per tab, lunch open by default.
+    grids = '<style>.css3-tabstrip > div { display: none } .css3-tabstrip > input:checked + label + div { display: block }</style><div class="css3-tabstrip">'
+    for n, (meal, suffix) in enumerate(zip(MEALS, ("Breakfast", "Lunch", "Dinner"))):
         if suffix in HIDE_GRIDS:
             continue
         prefix = f"cphMain_grdReservation{suffix}"
@@ -176,11 +185,14 @@ async def reservation(request: Request):
             checked = ' checked="checked"' if reserved else ""
             status = '<img id="{prefix}_imgStaus_{i}" title="رزرو شده">' if reserved else ""
             rows += f"""<tr>
-              <td><input type="checkbox" id="{prefix}_chkReserve_{i}" name="chk{i}"{checked}{'' if not info.get('locked') else DISABLED}></td>
+              <td><input type="checkbox" id="{prefix}_chkReserve_{i}" name="{suffix}chk{i}"{checked}{'' if not info.get('locked') else DISABLED}></td>
               <td>{day}</td><td>
               {_row_controls(prefix, i, foods, chosen, "1", not info.get('locked'), False)}
               <td>{status}</td></tr>"""
-        grids += f'<table id="{prefix}">{rows}</table>'
+        grids += (f'<input type="radio" name="tabstrip" id="css3-tabstrip-0-{n}"{" checked" if suffix == "Lunch" else ""}>'
+                  f'<label for="css3-tabstrip-0-{n}">{meal}</label><div id="tabs-{n + 1}"><table id="{prefix}">{rows}</table>'
+                  f'<input type="submit" id="cphMain_btnSave{suffix}" name="btnSave{suffix}" value="ذخیره"></div>')
+    grids += "</div>"
     return HTMLResponse(f"""<html><body><form method="post">
       {PROFILE_SNIPPET}
       <label id="cphMain_lblWeekDate">{days[0]} الی {days[-1]}</label>

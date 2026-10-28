@@ -50,6 +50,7 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         fake_site.STOCK.clear()
         fake_site.PURCHASES.clear()
         fake_site.MENU.clear()
+        fake_site.WEEK_SAVES.clear()
         self.pw = await async_playwright().start()
         self.browser = await launch_browser(self.pw)
         # Tiny intervals for tests only (the floors are bypassed on purpose).
@@ -153,6 +154,16 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(LoginFailed):
             await c.login()
         await c.close()
+
+    async def test_auto_reserve_opens_hidden_meal_tabs(self):
+        # Only the lunch tab is open on the real page; dinner sits in a hidden tab.
+        fake_site.MENU["1405/08/09"] = {"ناهار": {"foods": ["قیمه"], "reserved": "قیمه"}, "شام": {"foods": ["ماکارونی", "کتلت"]}}
+        fake_site.MENU["1405/08/10"] = {"ناهار": {"foods": ["کباب"]}, "شام": {"foods": ["عدسی"], "locked": True}}
+        c = self.client()
+        results = await c.auto_reserve_week("1405/08/09", ["ناهار", "شام"])
+        await c.close()
+        self.assertEqual(fake_site.WEEK_SAVES, [("1405/08/10", "ناهار"), ("1405/08/09", "شام")], results)
+        self.assertEqual(fake_site.MENU["1405/08/09"]["شام"]["reserved"], "ماکارونی")
 
     async def test_refresh_reads_this_and_next_week_for_everyone(self):
         from unittest import mock

@@ -32,6 +32,7 @@ def _in_window(job_row) -> bool:
 
 OP_TIMEOUT = 600  # covers a manual captcha wait (CAPTCHA_MANUAL_TIMEOUT)
 RESERVATION_RECHECK = 600  # seconds between "is this meal already reserved?" checks per job
+AUTO_RESERVE_RETRY = 3600  # seconds before a failed scheduled auto-reserve is tried again
 WEEK_MENU_AUTO_KEY = "week_menu_auto"  # settings key: date of the last scheduled week-menu refresh
 
 
@@ -68,6 +69,7 @@ class Worker:
         self.reservation_checked: dict[int, float] = {}  # job id -> monotonic time of last check
         self.menu_refreshing = False  # one shared week-menu refresh at a time
         self.menu_auto_tried = 0.0  # time of the last scheduled refresh attempt
+        self.auto_reserve_tried: dict[int, float] = {}  # account id -> time of the last scheduled auto-reserve
         self._pw = None
         self.browser = None
 
@@ -117,8 +119,11 @@ class Worker:
                         for acc_row in auto_accounts:
                             aid = acc_row["id"]
                             uid = acc_row["user_id"]
-                            if uid not in self.ops or self.ops[uid].get("state") != "running":
-                                self.run_auto_reserve(uid, aid, target_week)
+                            # A failed run is retried at most once an hour, not on every loop (logins can get the account banned).
+                            if time.time() - self.auto_reserve_tried.get(aid, 0) < AUTO_RESERVE_RETRY:
+                                continue
+                            if not self.busy(uid) and self.run_auto_reserve(uid, aid, target_week):
+                                self.auto_reserve_tried[aid] = time.time()
             except Exception:
                 log.exception("supervisor error")
             await asyncio.sleep(5)

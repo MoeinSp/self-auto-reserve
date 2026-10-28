@@ -108,6 +108,21 @@ READ_ROWS_JS = r"""
 }
 """
 
+# The weekly reservation page is a CSS tab strip: <input type=radio id=css3-tabstrip-0-N>
+# <label for=...>meal</label> <div id=tabs-N+1>grid + save button</div>. Click the
+# label of the tab around the given grid, as a user would.
+SHOW_TAB_JS = r"""
+(grid) => {
+  const panel = grid.closest('div[id^="tabs-"]');
+  let radio = panel && panel.previousElementSibling;
+  while (radio && !radio.matches('input[type=radio]')) radio = radio.previousElementSibling;
+  if (!radio) return false;
+  const label = document.querySelector(`label[for="${radio.id}"]`);
+  if (label) label.click(); else radio.click();
+  return true;
+}
+"""
+
 # True while the page is still being parsed or an ASP.NET AJAX postback is
 # running. Not "complete": some subresource never finishes loading from the
 # server, so the load event comes 15-30 s late; the form works long before.
@@ -531,6 +546,17 @@ class CullinanClient:
         day = (await self.read_week(date)).get(date, {})
         return {m: info for m, info in day.items() if not meal or matches(m, meal)}
 
+    async def _show_tab(self, page: Page, grid_sel: str, meal: str) -> None:
+        """Open the tab (صبحانه / ناهار / شام) holding `grid_sel`; only one meal's grid and save button are shown at a time."""
+        grid = page.locator(grid_sel).first
+        if await grid.is_visible():
+            return
+        await grid.evaluate(SHOW_TAB_JS)
+        try:
+            await grid.wait_for(state="visible", timeout=5000)
+        except PlaywrightTimeout:
+            raise SiteError(f"زبانهٔ {meal} در صفحهٔ رزرو باز نشد") from None
+
     async def auto_reserve_week(self, target_date: str, wanted_meals: list[str]) -> list[str]:
         """Automatically reserve meals for the week containing `target_date`.
         Processes meals in order (e.g. صبحانه, ناهار, شام) and days in order (شنبه تا چهارشنبه).
@@ -570,6 +596,7 @@ class CullinanClient:
             rows = await self._rows(page, grid_sel) or []
             if not rows:
                 continue
+            await self._show_tab(page, grid_sel, meal)
 
             changed = False
             for idx, row in enumerate(rows):
@@ -598,6 +625,7 @@ class CullinanClient:
                         check = rows[idx]["check"]
 
                 if not check["disabled"] and not check["checked"]:
+                    await self._show_tab(page, grid_sel, meal)  # a postback may have switched tabs
                     await page.locator(_css(check)).check()
                     changed = True
                     results.append(f"★ {day_str} ({meal}): ثبت شد («{food_name(first_food['text'])}»)")
@@ -606,6 +634,7 @@ class CullinanClient:
                 btn_sel = save_buttons.get(meal)
                 save_btn = page.locator(btn_sel).first if btn_sel else None
                 if save_btn and await save_btn.count() > 0:
+                    await self._show_tab(page, grid_sel, meal)
                     await self.throttle.wait(step=True)
                     await self._postback(page, save_btn.click)
                     msg = norm(" ".join(self.dialogs[-1:]) + " " + await self._text(page, SEL["page_message"]))
