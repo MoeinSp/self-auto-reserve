@@ -598,7 +598,7 @@ class CullinanClient:
                 continue
             await self._show_tab(page, grid_sel, meal)
 
-            changed = False
+            ticked: list[tuple[int, str, str]] = []  # (row index, day, food) ticked for this save
             for idx, row in enumerate(rows):
                 day_m = DATE_RE.search(norm(row["label"]))
                 day_str = day_m.group(0) if day_m else f"روز {idx+1}"
@@ -627,19 +627,28 @@ class CullinanClient:
                 if not check["disabled"] and not check["checked"]:
                     await self._show_tab(page, grid_sel, meal)  # a postback may have switched tabs
                     await page.locator(_css(check)).check()
-                    changed = True
-                    results.append(f"★ {day_str} ({meal}): ثبت شد («{food_name(first_food['text'])}»)")
+                    ticked.append((idx, day_str, food_name(first_food["text"])))
 
-            if changed:
+            if ticked:
                 btn_sel = save_buttons.get(meal)
                 save_btn = page.locator(btn_sel).first if btn_sel else None
-                if save_btn and await save_btn.count() > 0:
-                    await self._show_tab(page, grid_sel, meal)
-                    await self.throttle.wait(step=True)
-                    await self._postback(page, save_btn.click)
-                    msg = norm(" ".join(self.dialogs[-1:]) + " " + await self._text(page, SEL["page_message"]))
-                    if msg:
-                        results.append(f"پیام سامانه برای {meal}: {msg}")
+                if not save_btn or await save_btn.count() == 0:
+                    results.append(f"✗ {meal}: دکمهٔ ذخیره در صفحهٔ رزرو پیدا نشد؛ چیزی رزرو نشد")
+                    continue
+                await self._show_tab(page, grid_sel, meal)
+                await self.throttle.wait(step=True)
+                await self._postback(page, save_btn.click)
+                msg = norm(" ".join(self.dialogs[-1:]) + " " + await self._text(page, SEL["page_message"]))
+                # Report what the site actually saved (e.g. low credit saves only some days).
+                after = await self._rows(page, grid_sel) or []
+                for idx, day_str, name in ticked:
+                    row = after[idx] if idx < len(after) else None
+                    if row and (row["check"]["checked"] or "رزرو شده" in row["status"]):
+                        results.append(f"★ {day_str} ({meal}): ثبت شد («{name}»)")
+                    else:
+                        results.append(f"✗ {day_str} ({meal}): ثبت نشد («{name}»)")
+                if msg:
+                    results.append(f"پیام سامانه برای {meal}: {msg}")
 
         return results
 

@@ -51,6 +51,7 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         fake_site.PURCHASES.clear()
         fake_site.MENU.clear()
         fake_site.WEEK_SAVES.clear()
+        fake_site.state.pop("credit_days", None)
         self.pw = await async_playwright().start()
         self.browser = await launch_browser(self.pw)
         # Tiny intervals for tests only (the floors are bypassed on purpose).
@@ -164,6 +165,18 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         await c.close()
         self.assertEqual(fake_site.WEEK_SAVES, [("1405/08/10", "ناهار"), ("1405/08/09", "شام")], results)
         self.assertEqual(fake_site.MENU["1405/08/09"]["شام"]["reserved"], "ماکارونی")
+        self.assertIn("★ 1405/08/09 (شام): ثبت شد («ماکارونی»)", results)
+
+    async def test_auto_reserve_reports_days_the_site_did_not_save(self):
+        fake_site.MENU["1405/08/09"] = {"شام": {"foods": ["ماکارونی"]}}
+        fake_site.MENU["1405/08/10"] = {"شام": {"foods": ["عدسی"]}}
+        fake_site.state["credit_days"] = 1  # credit for one dinner only
+        c = self.client()
+        results = await c.auto_reserve_week("1405/08/09", ["شام"])
+        await c.close()
+        self.assertEqual(fake_site.WEEK_SAVES, [("1405/08/09", "شام")])
+        self.assertIn("★ 1405/08/09 (شام): ثبت شد («ماکارونی»)", results)
+        self.assertIn("✗ 1405/08/10 (شام): ثبت نشد («عدسی»)", results)
 
     async def test_refresh_reads_this_and_next_week_for_everyone(self):
         from unittest import mock

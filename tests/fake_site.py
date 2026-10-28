@@ -167,9 +167,13 @@ async def reservation(request: Request):
         if f.get(f"btnSave{suffix}"):  # save one meal's ticked days, like the real per-tab buttons
             for i, day in enumerate(days):
                 info = MENU.get(day, {}).get(meal)
+                if state.get("credit_days") is not None and state["credit_days"] <= 0:
+                    break  # out of credit: the real site saves only the days it can pay for
                 if f.get(f"{suffix}chk{i}") and info and info.get("foods") and not info.get("reserved"):
                     info["reserved"] = info["foods"][0]
                     WEEK_SAVES.append((day, meal))
+                    if state.get("credit_days") is not None:
+                        state["credit_days"] -= 1
     # Like the real page: a CSS tab strip, one meal per tab, lunch open by default.
     grids = '<style>.css3-tabstrip > div { display: none } .css3-tabstrip > input:checked + label + div { display: block }</style><div class="css3-tabstrip">'
     for n, (meal, suffix) in enumerate(zip(MEALS, ("Breakfast", "Lunch", "Dinner"))):
