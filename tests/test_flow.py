@@ -180,6 +180,19 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(menu), 14)
         self.assertEqual(menu["1405/08/05"]["ناهار"], ["قیمه"])
         self.assertEqual(menu["1405/08/05"], {"صبحانه": [], "ناهار": ["قیمه"], "شام": []})  # empty meals kept
+
+        # A meal whose grid is missing from the page keeps the foods saved before.
+        fake_site.HIDE_GRIDS.add("Lunch")
+        try:
+            with mock.patch.object(w, "client_for", return_value=self.client()),                     mock.patch.object(jalali, "today_str", return_value="1405/08/05"),                     mock.patch.object(jalali, "get_next_week_days", return_value=[]):
+                self.assertTrue(w.refresh_week_menu(1, 1))
+                while "finished" not in w.ops[1] or w.ops[1]["state"] == "running":
+                    await asyncio.sleep(0.05)
+                await asyncio.sleep(0.3)
+        finally:
+            fake_site.HIDE_GRIDS.clear()
+        self.assertEqual(w.ops[1]["state"], "ok", w.ops[1]["message"])
+        self.assertEqual(db.week_menu("1405/08/05")["1405/08/05"]["ناهار"], ["قیمه"])
         self.assertEqual(menu["1405/08/12"]["شام"], ["ماکارونی", "کتلت"])
 
 

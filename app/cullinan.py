@@ -14,6 +14,7 @@ from typing import Awaitable, Callable
 from urllib.parse import urljoin
 
 from playwright.async_api import Browser, BrowserContext, Page, Route
+from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from . import config
 from .ratelimit import Throttle
@@ -506,7 +507,13 @@ class CullinanClient:
 
         week: dict[str, dict[str, dict]] = {}
         for meal, suffix in WEEK_GRIDS.items():
-            for row in await self._rows(page, f"[id$='grdReservation{suffix}']") or []:
+            grid = f"[id$='grdReservation{suffix}']"
+            try:
+                # One grid has been seen missing right after the page opened; give it a moment.
+                await page.locator(grid).first.wait_for(state="attached", timeout=8000)
+            except PlaywrightTimeout:
+                log.warning("reservation page: %s grid missing for week of %s", meal, date)
+            for row in await self._rows(page, grid) or []:
                 day = DATE_RE.search(norm(row["label"]))
                 if not day:
                     continue

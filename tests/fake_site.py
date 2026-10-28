@@ -148,6 +148,7 @@ WEEKS = [
     [f"1405/08/{d:02d}" for d in range(9, 16)],
 ]
 MENU: dict[str, dict[str, dict]] = {}
+HIDE_GRIDS: set[str] = set()  # grid suffixes left out of the page, e.g. {"Lunch"}
 
 
 @app.api_route("/Reservation/Reservation.aspx", methods=["GET", "POST"])
@@ -163,6 +164,8 @@ async def reservation(request: Request):
     days = WEEKS[week]
     grids = ""
     for meal, suffix in zip(MEALS, ("Breakfast", "Lunch", "Dinner")):
+        if suffix in HIDE_GRIDS:
+            continue
         prefix = f"cphMain_grdReservation{suffix}"
         rows = ""
         for i, day in enumerate(days):

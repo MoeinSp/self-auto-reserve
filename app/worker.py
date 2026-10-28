@@ -340,9 +340,15 @@ class Worker:
                         if not week:
                             raise
                         continue  # next week not published yet
+                    stored = db.week_menu(min(found)) if found else {}
                     for day, meals in found.items():
-                        # Every meal is kept, empty when the site has nothing for it that day.
-                        week[day] = {meal: meals.get(meal, {}).get("foods", []) for meal in WEEK_GRIDS}
+                        # Every meal is kept, empty when the site has nothing for it that day. A meal
+                        # whose grid was missing from the page keeps the foods saved before.
+                        old = stored.get(day, {})
+                        week[day] = {
+                            meal: meals[meal]["foods"] if meal in meals else old.get(meal, [])
+                            for meal in WEEK_GRIDS
+                        }
                 if not any(foods for meals in week.values() for foods in meals.values()):
                     raise SiteError("در برنامهٔ غذایی این هفته غذایی پیدا نشد.")
                 db.save_week_menu(week)
