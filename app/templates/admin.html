@@ -1,220 +1,185 @@
 {% extends "base.html" %}
-{% block header_extra %}
-<div class="user-chip">
-  <span class="muted">مدیر سیستم</span>
-  <span class="avatar">{{ user.username[:1]|upper }}</span>
-  <span>{{ user.username }}</span>
-  <a href="/" class="link">← داشبورد اصلی</a>
-  <form method="post" action="/logout"><button class="link">خروج</button></form>
-</div>
-{% endblock %}
+{% from "_ui.html" import icon, user_menu %}
+{% block title %}مدیریت · سلف خودکار{% endblock %}
+{% block body_class %}has-tabs{% endblock %}
+{% block body_attrs %}data-tabs-key="admin"{% endblock %}
+{% block header_extra %}{{ user_menu(user, ('/', 'داشبورد')) }}{% endblock %}
 {% block content %}
 
-<div class="admin-header-row">
-  <div>
-    <h1>پنل مدیریت سیستم</h1>
-    <p class="muted">مدیریت کاربران، حساب‌های سلف متصل، نظارت بر تمام تسک‌ها و کنترل محدودیت‌های ساعتی (Rate Limits)</p>
+<div class="stats four">
+  <div class="stat"><b>{{ total_users }}</b><span>کاربر پنل</span></div>
+  <div class="stat"><b>{{ total_accounts }}</b><span>حساب سلف</span></div>
+  <div class="stat"><b class="c-warn">{{ active_jobs }}</b><span>کار فعال</span></div>
+  <div class="stat"><b>{{ max_requests_hour or '∞' }}<small class="muted"> / {{ max_logins_hour or '∞' }}</small></b><span>سقف ساعتی درخواست / ورود</span></div>
+</div>
+
+<nav class="tabs" aria-label="بخش‌های مدیریت">
+  <a href="#settings" data-tab="settings">{{ icon('gauge') }}<span>محدودیت</span></a>
+  <a href="#accounts" data-tab="accounts">{{ icon('user') }}<span>حساب‌ها</span></a>
+  <a href="#users" data-tab="users">{{ icon('users') }}<span>کاربران</span></a>
+  <a href="#jobs" data-tab="jobs">{{ icon('list') }}<span>کارها</span></a>
+  <a href="#logs" data-tab="logs">{{ icon('clock') }}<span>گزارش</span></a>
+</nav>
+
+{# ============================================================ SETTINGS #}
+<section class="panel" id="settings" data-panel>
+  <div class="panel-head">
+    <h1>محدودیت درخواست‌ها</h1>
+    <p class="muted">برای همهٔ حساب‌ها اعمال می‌شود و بدون ری‌استارت همین حالا اثر می‌کند. پیش‌فرض‌ها از فایل <code>.env</code> می‌آیند.</p>
   </div>
-  <form method="post" action="/admin/rate-limit/reset">
-    <input type="hidden" name="account_id" value="0">
-    <button class="reset-all-btn">⚡ صفر کردن محدودیت تمام حساب‌ها</button>
+  <form method="post" action="/admin/settings" class="stack">
+    <div class="card stack">
+      <div class="card-title">{{ icon('gauge') }}<h2>سقف ساعتی (هر حساب)</h2></div>
+      <div class="grid-2">
+        <div class="field">
+          <label for="s-req">درخواست در ساعت</label>
+          <input id="s-req" name="MAX_REQUESTS_PER_HOUR" type="number" min="1" step="1" inputmode="numeric"
+                 value="{{ limits.MAX_REQUESTS_PER_HOUR or limit_defaults.MAX_REQUESTS_PER_HOUR or 500 }}" data-cap-input="no_request_cap">
+          <label class="check"><input type="checkbox" name="no_request_cap" value="1" {% if not limits.MAX_REQUESTS_PER_HOUR %}checked{% endif %} data-cap-toggle="s-req"><span>بدون سقف</span></label>
+          <small class="hint">پیش‌فرض: {{ limit_defaults.MAX_REQUESTS_PER_HOUR or 'بدون سقف' }}</small>
+        </div>
+        <div class="field">
+          <label for="s-login">ورود (کپچا) در ساعت</label>
+          <input id="s-login" name="MAX_LOGINS_PER_HOUR" type="number" min="1" step="1" inputmode="numeric"
+                 value="{{ limits.MAX_LOGINS_PER_HOUR or limit_defaults.MAX_LOGINS_PER_HOUR or 6 }}">
+          <label class="check"><input type="checkbox" name="no_login_cap" value="1" {% if not limits.MAX_LOGINS_PER_HOUR %}checked{% endif %} data-cap-toggle="s-login"><span>بدون سقف</span></label>
+          <small class="hint">پیش‌فرض: {{ limit_defaults.MAX_LOGINS_PER_HOUR or 'بدون سقف' }}</small>
+        </div>
+      </div>
+    </div>
+
+    <div class="card stack">
+      <div class="card-title">{{ icon('clock') }}<h2>فاصلهٔ درخواست‌ها (ثانیه)</h2></div>
+      <div class="grid-2">
+        <label class="field">فاصلهٔ پیش‌فرض بررسی سبد
+          <input name="POLL_SECONDS" type="number" min="1" step="0.5" inputmode="decimal" value="{{ limits.POLL_SECONDS|num }}">
+          <small class="hint">پیش‌فرض: {{ limit_defaults.POLL_SECONDS|num }} · برای کارهایی که کاربر عددی نداده</small>
+        </label>
+        <label class="field">کمترین فاصله‌ای که کاربر می‌تواند بگذارد
+          <input name="MIN_JOB_INTERVAL" type="number" min="0.5" step="0.5" inputmode="decimal" value="{{ limits.MIN_JOB_INTERVAL|num }}">
+          <small class="hint">پیش‌فرض: {{ limit_defaults.MIN_JOB_INTERVAL|num }}</small>
+        </label>
+        <label class="field">فاصلهٔ مراحل داخل یک بررسی
+          <input name="STEP_SECONDS" type="number" min="0.5" step="0.1" inputmode="decimal" value="{{ limits.STEP_SECONDS|num }}">
+          <small class="hint">پیش‌فرض: {{ limit_defaults.STEP_SECONDS|num }} · بین انتخاب تاریخ، وعده و ذخیره</small>
+        </label>
+        <label class="field">تأخیر تصادفی (درصد)
+          <input name="POLL_JITTER" type="number" min="0" max="100" step="5" inputmode="numeric" value="{{ (limits.POLL_JITTER * 100)|round|int }}">
+          <small class="hint">پیش‌فرض: {{ (limit_defaults.POLL_JITTER * 100)|round|int }}٪ · رفتار را طبیعی‌تر می‌کند</small>
+        </label>
+      </div>
+      <p class="note warn">{{ icon('alert') }} سقف بالا یا فاصلهٔ کم، احتمال مسدود شدن حساب دانشجو را بالا می‌برد. «بدون سقف» را فقط موقت و با فاصلهٔ معقول استفاده کن.</p>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn primary lg">{{ icon('check') }} ذخیره و اعمال</button>
+      <button class="btn ghost" formaction="/admin/settings/reset" formnovalidate data-confirm="همهٔ محدودیت‌ها به پیش‌فرض برگردد؟">بازگشت به پیش‌فرض</button>
+    </div>
   </form>
-</div>
-
-<div class="stats">
-  <div class="stat"><b>{{ total_users }}</b><span>کل کاربران پنل</span></div>
-  <div class="stat"><b>{{ total_accounts }}</b><span>حساب‌های سلف متصل</span></div>
-  <div class="stat active"><b>{{ active_jobs }}</b><span>کارهای در حال پیگیری</span></div>
-  <div class="stat"><b>{{ max_requests_hour }} / {{ max_logins_hour }}</b><span>سقف ساعتی (ریکوئست / ورود)</span></div>
-</div>
-
-<section class="card admin-section">
-  <div class="card-head">
-    <span class="step">⚡</span>
-    <h2>حساب‌های سلف و وضعیت محدودیت‌ها (Rate Limits)</h2>
-  </div>
-  <div class="table-responsive">
-    <table class="admin-table">
-      <thead>
-        <tr>
-          <th>شناسه</th>
-          <th>نام دانشجو</th>
-          <th>شماره دانشجویی</th>
-          <th>کاربر پنل</th>
-          <th>درخواست‌های اخیر</th>
-          <th>ورودهای اخیر</th>
-          <th>کارهای فعال</th>
-          <th>وضعیت</th>
-          <th>عملیات</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for acc in accounts %}
-        <tr>
-          <td>#{{ acc.id }}</td>
-          <td><b>{{ acc.display_name or '—' }}</b></td>
-          <td dir="ltr">{{ acc.site_username }}</td>
-          <td><span class="user-tag">{{ acc.owner_username }}</span></td>
-          <td>
-            <div class="rate-bar-container" title="{{ acc.stats.hits }} از {{ acc.stats.max_hits }}">
-              <div class="rate-bar-fill {% if acc.stats.hits >= acc.stats.max_hits %}full{% endif %}" style="width: {{ [((acc.stats.hits / acc.stats.max_hits) * 100)|int, 100]|min }}%;"></div>
-            </div>
-            <small>{{ acc.stats.hits }} / {{ acc.stats.max_hits }}</small>
-          </td>
-          <td>
-            <div class="rate-bar-container" title="{{ acc.stats.logins }} از {{ acc.stats.max_logins }}">
-              <div class="rate-bar-fill {% if acc.stats.logins >= acc.stats.max_logins %}full{% endif %}" style="width: {{ [((acc.stats.logins / acc.stats.max_logins) * 100)|int, 100]|min }}%;"></div>
-            </div>
-            <small>{{ acc.stats.logins }} / {{ acc.stats.max_logins }}</small>
-          </td>
-          <td>{{ acc.active_jobs_count }}</td>
-          <td>
-            {% if acc.stats.is_limited %}
-              <span class="badge failed">لیمیت شده</span>
-            {% elif acc.stats.hits > 0 or acc.stats.logins > 0 %}
-              <span class="badge active">فعال</span>
-            {% else %}
-              <span class="badge done">آزاد</span>
-            {% endif %}
-          </td>
-          <td>
-            <form method="post" action="/admin/rate-limit/reset">
-              <input type="hidden" name="account_id" value="{{ acc.id }}">
-              <button class="secondary small-btn" title="حذف محدودیت و ریست کردن شمارنده‌های این حساب">صفر کردن لیمیت</button>
-            </form>
-          </td>
-        </tr>
-        {% else %}
-        <tr><td colspan="9" class="empty">هیچ حساب سلفی ثبت نشده است.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
 </section>
 
-<section class="card admin-section">
-  <div class="card-head">
-    <span class="step">👥</span>
-    <h2>کاربران پنل</h2>
+{# ============================================================ ACCOUNTS #}
+<section class="panel" id="accounts" data-panel>
+  <div class="panel-head row-between">
+    <h1>حساب‌های سلف</h1>
+    <form method="post" action="/admin/rate-limit/reset">
+      <input type="hidden" name="account_id" value="0">
+      <button class="btn ghost sm" data-confirm="شمارندهٔ درخواست همهٔ حساب‌ها صفر شود؟">{{ icon('refresh') }} صفر کردن همه</button>
+    </form>
   </div>
-  <div class="table-responsive">
-    <table class="admin-table">
-      <thead>
-        <tr>
-          <th>شناسه</th>
-          <th>نام کاربری</th>
-          <th>نقش</th>
-          <th>تعداد حساب سلف</th>
-          <th>تعداد تسک‌ها</th>
-          <th>تاریخ عضویت</th>
-          <th>عملیات</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for u in users %}
-        <tr>
-          <td>#{{ u.id }}</td>
-          <td><b>{{ u.username }}</b></td>
-          <td>
-            {% if u.is_admin %}
-              <span class="admin-pill">مدیر</span>
-            {% else %}
-              <span class="muted">کاربر عادی</span>
-            {% endif %}
-          </td>
-          <td>{{ u.accounts_count }}</td>
-          <td>{{ u.jobs_count }}</td>
-          <td>{{ u.created_at|ts }}</td>
-          <td>
-            <div class="btns">
-              {% if u.id != user.id %}
-                <form method="post" action="/admin/users/{{ u.id }}/role">
-                  <button class="link">{% if u.is_admin %}سلب مدیریت{% else %}ارتقا به مدیر{% endif %}</button>
-                </form>
-                <form method="post" action="/admin/users/{{ u.id }}/delete" onsubmit="return confirm('کاربر «{{ u.username }}» و تمام حساب‌ها و کارهای او حذف شوند؟')">
-                  <button class="link danger">حذف</button>
-                </form>
-              {% else %}
-                <span class="muted small">حساب خودتان</span>
-              {% endif %}
-            </div>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
-
-<section class="card admin-section">
-  <div class="card-head">
-    <span class="step">📋</span>
-    <h2>تمام تسک‌های سیستم</h2>
-  </div>
-  <div class="table-responsive">
-    <table class="admin-table">
-      <thead>
-        <tr>
-          <th>شناسه</th>
-          <th>مالک</th>
-          <th>حساب سلف</th>
-          <th>تاریخ و وعده</th>
-          <th>غذاها</th>
-          <th>وضعیت</th>
-          <th>تلاش‌ها / پیام</th>
-          <th>عملیات</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for j in jobs %}
-        <tr>
-          <td>#{{ j.id }}</td>
-          <td><span class="user-tag">{{ j.owner_username }}</span></td>
-          <td><b>{{ j.account_name or j.site_username or '—' }}</b></td>
-          <td>{{ j.date }} <small class="muted">({{ j.meal or 'همه' }})</small></td>
-          <td><div class="small-text">{{ j.foods.splitlines()|join('، ') }}</div></td>
-          <td><span class="badge {{ j.status }}">{{ STATUS_FA[j.status] }}</span></td>
-          <td>
-            <div class="small-text">
-              {% if j.attempts %}تلاش {{ j.attempts }}{% endif %}
-              {% if j.message %}<div class="muted">{{ j.message }}</div>{% endif %}
-            </div>
-          </td>
-          <td>
-            <div class="btns">
-              {% if j.status == 'active' %}
-                <form method="post" action="/admin/jobs/{{ j.id }}/stop"><button class="link">توقف</button></form>
-              {% else %}
-                {% if j.status != 'done' %}<form method="post" action="/admin/jobs/{{ j.id }}/resume"><button class="link">ادامه</button></form>{% endif %}
-                <form method="post" action="/admin/jobs/{{ j.id }}/delete"><button class="link danger">حذف</button></form>
-              {% endif %}
-            </div>
-          </td>
-        </tr>
-        {% else %}
-        <tr><td colspan="8" class="empty">هیچ کاری در سیستم ثبت نشده است.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
-
-<section class="card admin-section">
-  <div class="card-head">
-    <span class="step">📜</span>
-    <h2>آخرین لاگ‌های سیستمی</h2>
-  </div>
-  <ul class="logs">
-    {% for l in logs %}
-    <li class="{{ l.level }}">
-      <time>{{ l.created_at|ts }}</time>
-      <span class="user-tag">{{ l.owner_username }}</span>
-      <span class="msg" title="{{ l.message }}">{{ l.message }}</span>
-    </li>
+  <div class="cards">
+    {% for acc in accounts %}
+    <article class="card row-card">
+      <div class="row-card-head">
+        <div><b>{{ acc.display_name or '—' }}</b> <span class="muted" dir="ltr">{{ acc.site_username }}</span></div>
+        {% if acc.stats.is_limited %}<span class="badge failed">به سقف رسیده</span>
+        {% elif acc.stats.hits or acc.stats.logins %}<span class="badge active">فعال</span>
+        {% else %}<span class="badge">بی‌کار</span>{% endif %}
+      </div>
+      <div class="kv">
+        <span>کاربر پنل</span><b>{{ acc.owner_username }}</b>
+        <span>کار فعال</span><b>{{ acc.active_jobs_count }}</b>
+        <span>درخواست / ساعت</span>
+        <b>{{ acc.stats.hits }} / {{ acc.stats.max_hits or '∞' }}
+          {% if acc.stats.max_hits %}<span class="meter{% if acc.stats.hits >= acc.stats.max_hits %} full{% endif %}"><i style="width: {{ [(acc.stats.hits * 100 / acc.stats.max_hits)|int, 100]|min }}%"></i></span>{% endif %}</b>
+        <span>ورود / ساعت</span><b>{{ acc.stats.logins }} / {{ acc.stats.max_logins or '∞' }}</b>
+      </div>
+      <form method="post" action="/admin/rate-limit/reset">
+        <input type="hidden" name="account_id" value="{{ acc.id }}">
+        <button class="btn ghost sm">{{ icon('refresh') }} صفر کردن شمارنده</button>
+      </form>
+    </article>
     {% else %}
-    <li class="empty">لاگی موجود نیست.</li>
+    <div class="empty">هیچ حساب سلفی ثبت نشده.</div>
     {% endfor %}
-  </ul>
+  </div>
 </section>
 
+{# ============================================================ USERS #}
+<section class="panel" id="users" data-panel>
+  <div class="panel-head"><h1>کاربران پنل</h1></div>
+  <div class="cards">
+    {% for u in users %}
+    <article class="card row-card">
+      <div class="row-card-head">
+        <div class="who"><span class="avatar">{{ u.username[:1]|upper }}</span><b>{{ u.username }}</b></div>
+        {% if u.is_admin %}<span class="badge done">مدیر</span>{% else %}<span class="badge">کاربر</span>{% endif %}
+      </div>
+      <div class="kv">
+        <span>حساب سلف</span><b>{{ u.accounts_count }}</b>
+        <span>کارها</span><b>{{ u.jobs_count }}</b>
+        <span>عضویت</span><b>{{ u.created_at|ts }}</b>
+      </div>
+      {% if u.id != user.id %}
+      <div class="btn-row">
+        <form method="post" action="/admin/users/{{ u.id }}/role"><button class="btn ghost sm">{{ 'لغو مدیریت' if u.is_admin else 'ارتقا به مدیر' }}</button></form>
+        <form method="post" action="/admin/users/{{ u.id }}/delete"><button class="btn ghost sm danger" data-confirm="کاربر «{{ u.username }}» و همهٔ حساب‌ها و کارهایش حذف شوند؟">{{ icon('trash') }} حذف</button></form>
+      </div>
+      {% else %}<p class="muted small">حساب خودت</p>{% endif %}
+    </article>
+    {% endfor %}
+  </div>
+</section>
+
+{# ============================================================ JOBS #}
+<section class="panel" id="jobs" data-panel>
+  <div class="panel-head"><h1>همهٔ کارها</h1></div>
+  {% if not jobs %}<div class="empty">هیچ کاری ثبت نشده.</div>{% endif %}
+  <div class="jobs">
+    {% for j in jobs %}
+    <article class="job s-{{ j.status }}">
+      <header class="job-top">
+        <div class="job-when">{{ icon('calendar') }}<b>{{ j.date }}</b><span class="muted">· {{ j.meal or 'هر وعده' }}</span></div>
+        <span class="badge {{ j.status }}">{{ STATUS_FA[j.status] }}</span>
+      </header>
+      <div class="job-foods">{% for f in j.foods.splitlines() if f.strip() %}<span class="food">{{ f }}</span>{% endfor %}</div>
+      <div class="job-meta">
+        <span>{{ icon('users') }} {{ j.owner_username }}</span>
+        <span>{{ icon('user') }} {{ j.account_name or j.site_username or '—' }}</span>
+        {% if j.attempts %}<span>{{ icon('refresh') }} {{ j.attempts }} بررسی</span>{% endif %}
+      </div>
+      {% if j.message %}<p class="job-msg">{{ j.message }}</p>{% endif %}
+      <footer class="job-actions">
+        {% if j.status == 'active' %}
+          <form method="post" action="/admin/jobs/{{ j.id }}/stop"><button class="btn ghost sm">{{ icon('pause') }} توقف</button></form>
+        {% else %}
+          {% if j.status != 'done' %}<form method="post" action="/admin/jobs/{{ j.id }}/resume"><button class="btn ghost sm">{{ icon('play') }} ادامه</button></form>{% endif %}
+          <form method="post" action="/admin/jobs/{{ j.id }}/delete"><button class="btn ghost sm danger">{{ icon('trash') }} حذف</button></form>
+        {% endif %}
+      </footer>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+
+{# ============================================================ LOGS #}
+<section class="panel" id="logs" data-panel>
+  <div class="panel-head"><h1>آخرین گزارش‌ها</h1></div>
+  <div class="card">
+    {% if not logs %}<div class="empty">گزارشی نیست.</div>{% endif %}
+    <ul class="logs">
+      {% for l in logs %}<li class="{{ l.level }}"><span class="msg"><span class="tag">{{ l.owner_username }}</span> {{ l.message }}</span><time>{{ l.created_at|ts }}</time></li>{% endfor %}
+    </ul>
+  </div>
+</section>
 {% endblock %}

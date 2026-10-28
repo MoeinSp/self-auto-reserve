@@ -1,552 +1,420 @@
 {% extends "base.html" %}
-{% block head %}
-{% set watching = jobs|selectattr('status', 'equalto', 'active')|list %}
-{% if (op and op.state == 'running') or watching %}
-<script>
-  // Keep the status and attempt counters fresh, but never reload while the user is typing.
-  setTimeout(function check() {
-    var el = document.activeElement;
-    if (el && /INPUT|TEXTAREA|SELECT/.test(el.tagName)) return setTimeout(check, 3000);
-    location.reload();
-  }, {{ 4000 if op and op.state == 'running' else 10000 }});
-</script>
-{% endif %}
-{% endblock %}
-{% block header_extra %}
-<div class="user-chip">
-  <span class="muted">امروز {{ today }}</span>
-  {% if user.is_admin %}
-    <a href="/admin" class="admin-pill-link">⚙️ پنل ادمین</a>
-  {% endif %}
-  <span class="avatar">{{ user.username[:1]|upper }}</span>
-  <span>{{ user.username }}</span>
-  <form method="post" action="/logout"><button class="link">خروج</button></form>
-</div>
-{% endblock %}
+{% from "_ui.html" import icon, user_menu %}
+{% set has_acc = active_account and active_id != 'new' %}
+{% set running = op and op.state == 'running' %}
+{% set active_jobs = jobs|selectattr('status', 'equalto', 'active')|list %}
+{% set done_jobs = jobs|selectattr('status', 'equalto', 'done')|list %}
+
+{% block body_class %}has-tabs{% endblock %}
+{% block body_attrs %}data-live-poll="{{ 3000 if (running or captcha_pending) else (8000 if active_jobs else 20000) }}" data-tabs-key="dash"{% endblock %}
+{% block header_extra %}{{ user_menu(user) }}{% endblock %}
+
 {% block content %}
 
+{# ---------------------------------------------------------------- captcha #}
+<div data-live="captcha" data-key="{{ 'on' if captcha_pending else 'off' }}">
 {% if captcha_pending %}
-<section class="card warn">
-  <div class="card-head"><span class="step">!</span><h2>کپچا را وارد کن</h2></div>
-  <p class="muted">ربات نتوانست کد امنیتی را بخواند؛ عدد داخل تصویر را بنویس.</p>
-  <img src="/captcha.png?{{ range(100000)|random }}" alt="کپچا" class="captcha">
-  <form method="post" action="/captcha" class="row">
-    <input name="code" inputmode="numeric" autocomplete="off" required autofocus>
-    <button>ارسال</button>
+<section class="card callout warn">
+  <div class="callout-head">{{ icon('alert') }}<h2>کد امنیتی را وارد کن</h2></div>
+  <p class="muted">ربات نتوانست کپچای سامانهٔ سلف را بخواند. عدد داخل تصویر را بنویس تا ورود ادامه پیدا کند.</p>
+  <form method="post" action="/captcha" class="captcha-form">
+    <img src="/captcha.png?t={{ now|int }}" alt="کپچا" class="captcha">
+    <input name="code" inputmode="numeric" autocomplete="off" required placeholder="کد" dir="ltr" aria-label="کد کپچا">
+    <button class="btn primary">ارسال</button>
   </form>
 </section>
 {% endif %}
+</div>
 
-{% if op and (op.state == 'running' or now - op.finished < 900) %}
-<section class="card op {{ op.state }}" role="status">
-  <div class="op-icon">{% if op.state == 'running' %}<span class="spinner"></span>{% elif op.state == 'ok' %}✓{% else %}✕{% endif %}</div>
-  <div style="flex:1">
+{# ------------------------------------------------------ background operation #}
+<div data-live="op" data-key="{{ (op.state ~ op.started) if op else '' }}" data-state="{{ op.state if op else '' }}">
+{% if op and (running or now - op.finished < 900) %}
+<section class="card op {{ op.state }}" role="status" data-op="{{ op.started }}">
+  <div class="op-icon">{% if running %}<span class="spinner"></span>{% elif op.state == 'ok' %}{{ icon('check') }}{% else %}{{ icon('x') }}{% endif %}</div>
+  <div class="op-body">
     <b>{{ op.title }}</b>
-    {% if op.state == 'running' %}
-      <div class="muted">در حال انجام… (از {{ (now - op.started)|int }} ثانیه پیش) — لطفاً چند لحظه صبر کنید.</div>
+    {% if running %}
+      <div class="muted small">در حال انجام… <span data-elapsed="{{ (now - op.started)|int }}">{{ (now - op.started)|int }}</span> ثانیه</div>
     {% elif op.message and op.message.startswith('PAYMENT_READY:') %}
       {% set pparts = op.message.split(':') %}
-      <div class="payment-callout">
-        <div class="payment-callout-text">
-          درگاه بانکی <strong>{{ pparts[2] }}</strong> آماده پرداخت شد (مبلغ: <strong>{{ '{:,}'.format(pparts[3]|int) }} ریال</strong>):
-        </div>
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <a href="{{ pparts[1] }}" target="_blank" rel="noopener noreferrer" class="direct-pay-link">
-            🚀 ورود مستقیم به درگاه پرداخت شاپرک ({{ pparts[2] }}) ↗
-          </a>
-          {% if active_account %}
-          <form method="post" action="/account/sync-credit" style="display:inline;margin:0">
-            <input type="hidden" name="account_id" value="{{ active_account.id }}">
-            <button type="submit" class="secondary" style="padding:10px 16px;border-radius:10px;font-size:13px;cursor:pointer">
-              🔄 بررسی افزایش موجودی پس از پرداخت
-            </button>
-          </form>
-          {% endif %}
-        </div>
+      <p class="op-msg">درگاه <b>{{ pparts[2] }}</b> برای <b>{{ '{:,}'.format(pparts[3]|int) }} ریال</b> آماده است.</p>
+      <div class="btn-row">
+        <a href="{{ pparts[1] }}" target="_blank" rel="noopener noreferrer" class="btn ok">{{ icon('card') }} رفتن به درگاه پرداخت</a>
+        {% if has_acc %}
+        <form method="post" action="/account/sync-credit">
+          <input type="hidden" name="account_id" value="{{ active_account.id }}">
+          <button class="btn ghost">{{ icon('refresh') }} بررسی موجودی بعد از پرداخت</button>
+        </form>
+        {% endif %}
       </div>
     {% else %}
-      <div>{{ op.message }}</div>
+      <p class="op-msg">{{ op.message }}</p>
     {% endif %}
   </div>
+  {% if not running %}<button type="button" class="icon-btn op-x" aria-label="بستن" data-dismiss-op="{{ op.started }}">{{ icon('x') }}</button>{% endif %}
 </section>
 {% endif %}
-
-{% set active = jobs|selectattr('status', 'equalto', 'active')|list|length %}
-{% set done = jobs|selectattr('status', 'equalto', 'done')|list|length %}
-<div class="stats">
-  <div class="stat active"><b>{{ active }}</b><span>در حال پیگیری</span></div>
-  <div class="stat ok"><b>{{ done }}</b><span>خریداری‌شده</span></div>
-  <div class="stat account">
-    <b>{{ accounts|length }} حساب</b>
-    <span>حساب‌های متصل سلف</span>
-  </div>
 </div>
 
-<div class="account-nav-bar">
-  <div class="account-nav-title">انتخاب حساب سامانهٔ سلف:</div>
-  <div class="account-chips">
-    {% for acc in accounts %}
-      <a href="/?account={{ acc.id }}" class="acc-chip {% if active_account and acc.id == active_account.id and active_id != 'new' %}active{% endif %}">
-        <span class="acc-avatar">👤</span>
-        <span class="acc-info">
-          <strong>{{ acc.display_name or acc.site_username }}</strong>
-          {% if acc.display_name %}<small>{{ acc.site_username }}</small>{% endif %}
-          {% if acc.credit %}<span class="chip-credit">💳 {{ acc.credit }}</span>{% endif %}
-        </span>
-        {% if active_account and acc.id == active_account.id and active_id != 'new' %}
-          <span class="acc-check">✓</span>
-        {% endif %}
-      </a>
-    {% endfor %}
-    <a href="/?account=new" class="acc-chip new-chip {% if active_id == 'new' or not accounts %}active{% endif %}">
-      <span>➕ افزودن حساب جدید</span>
-    </a>
-  </div>
+{# ---------------------------------------------------------- account switcher #}
+<div class="acc-bar" data-live="accounts">
+  {% for acc in accounts %}
+  {% set st = statuses[acc.id] %}
+  <a href="/?account={{ acc.id }}" class="acc-chip{% if has_acc and acc.id == active_account.id %} on{% endif %}" title="{{ st.text }}">
+    <span class="dot {{ st.status }}"></span>
+    <span class="acc-chip-text"><b>{{ acc.display_name or acc.site_username }}</b>{% if acc.credit %}<small>{{ acc.credit }}</small>{% elif acc.display_name %}<small dir="ltr">{{ acc.site_username }}</small>{% endif %}</span>
+  </a>
+  {% endfor %}
+  <a href="/?account=new#account" class="acc-chip add{% if active_id == 'new' or not accounts %} on{% endif %}">{{ icon('plus') }}<span>حساب سلف</span></a>
 </div>
 
-{% if active_account and active_id != 'new' %}
-<div class="account-session-bar" id="sessionStatusBar">
-  <div class="session-status-content">
-    <span class="status-indicator-dot checking"></span>
-    <span class="session-status-title">وضعیت اتصال به سامانه سلف:</span>
-    <span class="session-status-text" id="sessionStatusText">در حال استعلام نشست…</span>
-  </div>
-  <div class="session-status-timer">
-    <span>📡 بررسی خودکار هر ۳۰ ثانیه</span>
-    <button type="button" class="tiny-refresh-btn" onclick="checkAccountHealth(true)" title="استعلام مجدد">🔄 بررسی فوری</button>
-  </div>
-</div>
+{# ------------------------------------------------------------------ tabs #}
+<nav class="tabs" aria-label="بخش‌ها">
+  <a href="#buy" data-tab="buy">{{ icon('basket') }}<span>خرید</span></a>
+  <a href="#jobs" data-tab="jobs">{{ icon('list') }}<span>کارها</span><b class="tab-badge" data-live="jobs-badge">{% if active_jobs %}{{ active_jobs|length }}{% endif %}</b></a>
+  <a href="#account" data-tab="account">{{ icon('user') }}<span>حساب</span></a>
+  <a href="#tools" data-tab="tools">{{ icon('tools') }}<span>ابزارها</span></a>
+  <a href="#logs" data-tab="logs">{{ icon('clock') }}<span>گزارش</span></a>
+</nav>
 
-<div class="account-finance-card">
-  <div class="finance-header">
-    <div class="finance-status">
-      <span class="finance-icon">💳</span>
-      <div>
-        <div class="finance-label">اعتبار حساب سلف «{{ active_account.display_name or active_account.site_username }}»:</div>
-        <div class="credit-amount">
-          {% if active_account.credit %}
-            <strong>{{ active_account.credit }}</strong>
-          {% else %}
-            <span class="credit-not-synced">هنوز استعلام نشده</span>
-          {% endif %}
-        </div>
-        {% if active_account.credit_updated_at %}
-          <div class="finance-time">آخرین استعلام: {{ active_account.credit_updated_at|ts }}</div>
-        {% endif %}
-      </div>
-    </div>
-    <div class="finance-btns">
-      <form method="post" action="/account/sync-credit" style="display:inline">
-        <input type="hidden" name="account_id" value="{{ active_account.id }}">
-        <button class="secondary small-btn" {% if op and op.state == 'running' %}disabled{% endif %}>
-          🔄 بروزرسانی موجودی
+{% macro need_account() %}
+<div class="empty">
+  {{ icon('user', 'empty-i') }}
+  <p>اول اطلاعات ورود سامانهٔ سلف را اضافه کن.</p>
+  <a class="btn primary" href="/?account=new#account">{{ icon('plus') }} افزودن حساب سلف</a>
+</div>
+{% endmacro %}
+
+{# ============================================================== BUY #}
+<section class="panel" id="buy" data-panel>
+  <div class="panel-head">
+    <h1>خرید خودکار از سبد</h1>
+    <p class="muted">روز و وعده را انتخاب کن، غذاهای دلخواه را تیک بزن؛ ربات سبد را زیر نظر می‌گیرد و به محض آمدن، می‌خرد.</p>
+  </div>
+  {% if not has_acc %}{{ need_account() }}{% else %}
+  {% set menu_meal = (menu|list)[0] if menu and menu|length == 1 else '' %}
+  <form method="post" action="/jobs" class="stack" id="buyForm">
+    <input type="hidden" name="account_id" value="{{ active_account.id }}">
+
+    <div class="card stack">
+      <div class="step-title"><span class="step">۱</span>روز</div>
+      <div class="date-strip" role="radiogroup" aria-label="روز">
+        {% for d in upcoming_days %}
+        <button type="button" class="date-pill{% if (menu_date and d.date == menu_date) or (not menu_date and d.is_today) %} on{% endif %}"
+                data-date="{{ d.date }}" data-label="{{ d.short_label }}" role="radio">
+          <span class="dp-day">{{ d.day_name }}</span>
+          <span class="dp-num">{{ d.date[8:]|int }}</span>
+          <span class="dp-month">{{ d.short_label.split(' ')[-1] }}</span>
+          {% if d.is_today %}<span class="dp-tag">امروز</span>{% endif %}
         </button>
-      </form>
-      <button type="button" class="charge-toggle-btn" onclick="toggleChargeForm()">
-        💳 افزایش اعتبار (درگاه مستقیم) ▼
+        {% endfor %}
+      </div>
+      <details class="mini">
+        <summary>تاریخ دیگر <span class="muted" id="dateBadge" dir="ltr">{{ menu_date or today }}</span></summary>
+        <input id="dateInput" name="date" value="{{ menu_date or today }}" required placeholder="1405/08/05" dir="ltr" inputmode="numeric">
+      </details>
+
+      <div class="step-title"><span class="step">۲</span>وعده</div>
+      <div class="segmented">
+        {% for m in MEALS %}
+        <label><input type="radio" name="meal" value="{{ m }}" class="sr-only"{% if m == menu_meal %} checked{% endif %}><span>{{ m or 'همه' }}</span></label>
+        {% endfor %}
+      </div>
+      <button class="btn ghost block" formaction="/menu" formnovalidate {% if running %}disabled{% endif %}>
+        {{ icon('search') }} {{ 'دریافت دوبارهٔ غذاها' if menu else 'دیدن غذاهای این روز' }}
       </button>
     </div>
-  </div>
 
-  <div id="chargeDrawer" class="charge-drawer" style="display:none">
-    <form method="post" action="/account/pay">
-      <input type="hidden" name="account_id" value="{{ active_account.id }}">
-      <div class="charge-grid">
-        <div>
-          <label>مبلغ افزایش اعتبار:
-            <input type="text" name="amount" id="chargeAmountInput" required placeholder="مثلاً ۵۰,۰۰۰" inputmode="numeric">
-          </label>
-          <div class="quick-amounts">
-            <button type="button" class="amt-btn" onclick="setChargeAmount(30000)">۳۰ هزار تومان</button>
-            <button type="button" class="amt-btn" onclick="setChargeAmount(50000)">۵۰ هزار تومان</button>
-            <button type="button" class="amt-btn" onclick="setChargeAmount(100000)">۱۰۰ هزار تومان</button>
-            <button type="button" class="amt-btn" onclick="setChargeAmount(200000)">۲۰۰ هزار تومان</button>
-          </div>
-        </div>
-        <div>
-          <label>واحد مبلغ:
-            <select name="unit">
-              <option value="toman" selected>تومان</option>
-              <option value="rial">ریال</option>
-            </select>
-          </label>
-          <label>انتخاب درگاه بانکی:
-            <select name="bank">
-              <option value="0" selected>درگاه سداد (بانک ملی) — مستقیم و فعال</option>
-              <option value="1">درگاه به پرداخت ملت (BPM)</option>
-            </select>
-          </label>
-        </div>
-      </div>
-      <div style="margin-top:14px;padding:10px 14px;background:#fff8eb;border:1px solid #ffd899;border-radius:10px;font-size:12px;line-height:1.7;color:#854d0e">
-        ⚠️ <strong>نکته ضروری سلف:</strong> سرور دانشگاه تنها در صورتی تراکنش شاپرک را تأیید و شارژ می‌کند که در مرورگر گوشی لاگین سلف داشته باشید، در غیر این صورت به دلیل مسائل امنیتی سلف، شاپرک پول را به حسابتان برمی‌گرداند.
-      </div>
-      <div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
-        <a href="https://nut.uk.ac.ir/ePay/ePay_Payment.aspx" target="_blank" rel="noopener noreferrer" class="secondary" style="padding:10px 16px;border-radius:10px;text-decoration:none;font-size:13px;font-weight:bold;color:#475569">
-          🏛️ پرداخت مستقیم از صفحه سلف ↗
-        </a>
-        <button class="pay-submit-btn" {% if op and op.state == 'running' %}disabled{% endif %}>
-          ⚡ دریافت لینک مستقیم درگاه بانکی
-        </button>
-      </div>
-    </form>
-  </div>
-</div>
-{% endif %}
-
-<div class="dashboard-grid">
-  <!-- Card 1: Food Basket Jobs -->
-  <section class="card">
-    <div class="card-head"><span class="step">۱</span><h2>خرید خودکار از سبد غذایی</h2></div>
-    <form method="post" action="/jobs">
-      {% if accounts|length > 1 %}
-      <label>حساب دانشجو:
-        <select name="account_id">
-          {% for acc in accounts %}
-            <option value="{{ acc.id }}" {% if active_account and acc.id == active_account.id %}selected{% endif %}>
-              {{ acc.display_name or acc.site_username }} ({{ acc.site_username }})
-            </option>
-          {% endfor %}
-        </select>
-      </label>
-      {% elif accounts %}
-      <input type="hidden" name="account_id" value="{{ accounts[0].id }}">
-      <div class="acc-selected-badge" style="margin-bottom:12px">حساب: <b>{{ accounts[0].display_name or accounts[0].site_username }}</b> ({{ accounts[0].site_username }})</div>
-      {% endif %}
-
-      {% set menu_meal = (menu|list)[0] if menu and menu|length == 1 else '' %}
-      <div class="date-picker-block">
-        <div class="date-label-row">
-          <label>انتخاب روز و تقویم:</label>
-          <span class="selected-weekday-badge" id="selectedDateBadge">{{ jalali.format_jalali_short(menu_date or today) }}</span>
-        </div>
-        <div class="date-pills">
-          {% for d in upcoming_days %}
-            <button type="button" class="date-pill {% if (menu_date and d.date == menu_date) or (not menu_date and d.is_today) %}selected{% endif %}"
-                    onclick="selectDate('{{ d.date }}', '{{ d.short_label }}', this)">
-              <span class="pill-day">{{ d.day_name }}</span>
-              <span class="pill-date">{{ d.date[5:] }}</span>
-              {% if d.is_today %}<span class="pill-tag">امروز</span>{% endif %}
-            </button>
-          {% endfor %}
-        </div>
-        <div class="row">
-          <label>تاریخ (جلالی)
-            <input id="mainDateInput" name="date" value="{{ menu_date or today }}" required placeholder="1405/08/05" dir="ltr" onchange="updateDateBadge(this.value)">
-          </label>
-          <label>وعده
-            <select name="meal">{% for m in MEALS %}<option value="{{ m }}"{% if m and m == menu_meal %} selected{% endif %}>{{ m or 'فرقی نمی‌کند' }}</option>{% endfor %}</select>
-          </label>
-          <button class="secondary" formaction="/menu" formnovalidate {% if op and op.state == 'running' %}disabled{% endif %}>پیدا کردن غذاها</button>
-        </div>
-      </div>
-
+    <div class="card stack">
+      <div class="step-title"><span class="step">۳</span>غذاهای دلخواه</div>
       {% if menu %}
       <input type="hidden" name="menu_date" value="{{ menu_date }}">
-      <div class="menu-head">غذاهای <b dir="ltr">{{ menu_date }}</b> <span class="muted small">· به‌روز شده {{ menu_at|ts }}</span></div>
-      <div class="menu">
+      <div class="muted small">غذاهای <b>{{ jalali.format_jalali_short(menu_date) }}</b> · به‌روز شده {{ menu_at|ts }}</div>
+      <div class="meals">
         {% for meal, info in menu.items() %}{% set mi = loop.index0 %}
         <fieldset class="meal">
           <legend>{{ meal or 'غذاها' }}</legend>
-          {% if info.reserved %}<div class="res yes">رزرو داری: {{ info.reserved }}</div>
+          {% if info.reserved %}<div class="res yes">{{ icon('check') }} رزرو داری: {{ info.reserved }}</div>
           {% elif info.foods %}<div class="res">رزرو نداری{% if info.locked %} · مهلت رزرو گذشته{% endif %}</div>{% endif %}
           {% for f in info.foods %}
-          <label class="pick"><input type="checkbox" name="picks" value="{{ mi }}:{{ loop.index0 }}"><span>{{ f }}</span></label>
+          <label class="pick"><input type="checkbox" name="picks" value="{{ mi }}:{{ loop.index0 }}"><span>{{ f }}</span>{{ icon('check', 'pick-i') }}</label>
           {% else %}
           <p class="muted small">غذایی تعریف نشده</p>
           {% endfor %}
         </fieldset>
         {% endfor %}
       </div>
-      <p class="muted small">هر وعده‌ای که تیک بزنی یک کار جدا می‌شود. اگر در یک وعده چند غذا تیک بزنی، هر کدام زودتر موجود شود خریده می‌شود.</p>
+      <p class="hint">هر وعده یک کار جدا می‌شود. اگر در یک وعده چند غذا تیک بزنی، هر کدام زودتر در سبد بیاید خریده می‌شود.</p>
       {% else %}
-      <div class="empty">تاریخ و وعده را انتخاب کن و «پیدا کردن غذاها» را بزن؛ غذاهای آن وعده می‌آید و فقط تیک می‌زنی.</div>
+      <p class="muted small">دکمهٔ «دیدن غذاهای این روز» را بزن تا لیست غذاها بیاید و فقط تیک بزنی؛ یا نام غذا را دستی بنویس.</p>
       {% endif %}
-
-      <details class="manual" style="margin-top:10px">
-        <summary>نوشتن دستی نام غذا (برای وعدهٔ انتخاب‌شده)</summary>
-        <label>غذاهای دلخواه — هر خط یکی، به ترتیب اولویت (<code>*</code> = هر غذایی)
+      {% set any_food = menu and (menu.values()|map(attribute='foods')|select|list) %}
+      <details class="mini"{% if not any_food %} open{% endif %}>
+        <summary>نوشتن دستی نام غذا</summary>
+        <label class="field"><span>هر خط یک غذا، به ترتیب اولویت · <code>*</code> یعنی هر غذایی</span>
           <textarea name="foods" rows="3" placeholder="جوجه کباب&#10;چلو کباب&#10;*"></textarea>
         </label>
       </details>
-
-      <div class="row" style="margin-top:10px">
-        <label>تعداد <input name="quantity" type="number" min="1" max="5" value="1"></label>
-        <label>هر چند ثانیه چک کند <input name="poll_seconds" type="number" min="1" step="0.5" value="{{ poll_seconds|int }}"></label>
-      </div>
-      <label class="inline" style="margin-top:8px"><input type="checkbox" name="skip_if_reserved" value="1" checked>
-        اگر برای آن وعده رزرو داشتم، از سبد نخر</label>
-      <div class="row">
-        <label>از ساعت <input name="active_from" type="time"></label>
-        <label>تا ساعت <input name="active_to" type="time"></label>
-      </div>
-      <button class="block" style="margin-top:14px">شروع پیگیری</button>
-    </form>
-  </section>
-
-  <!-- Card 2: Weekly Auto-Reserve -->
-  <section class="card">
-    <div class="card-head">
-      <span class="step">۲</span>
-      <h2>رزرو خودکار هفتگی (هر چهارشنبه)</h2>
     </div>
-    <p class="muted small">هر چهارشنبه به محض باز شدن سامانه برای هفتهٔ بعد، ربات تمام روزها (از شنبه تا چهارشنبه) را برای وعده‌های انتخابی به ترتیب ثبت می‌کند.</p>
-    {% if active_account and active_id != 'new' %}
-      <form method="post" action="/account/auto-reserve">
-        <input type="hidden" name="account_id" value="{{ active_account.id }}">
-        <div class="auto-reserve-toggle">
-          <label class="switch-label">
-            <input type="checkbox" name="auto_reserve" value="1" {% if active_account.auto_reserve %}checked{% endif %} onchange="this.form.submit()">
-            <span class="switch-text"><strong>فعال‌سازی رزرو خودکار در چهارشنبه‌ها</strong></span>
-          </label>
+
+    <div class="card stack">
+      <div class="step-title"><span class="step">۴</span>تنظیمات</div>
+      <div class="grid-2">
+        <label class="field">تعداد
+          <input name="quantity" type="number" min="1" max="5" value="1" inputmode="numeric">
+        </label>
+        <label class="field">هر چند ثانیه چک کند
+          <input name="poll_seconds" type="number" min="{{ (min_job_interval)|num }}" step="0.5" value="{{ (poll_seconds)|num }}" inputmode="decimal" data-speed>
+        </label>
+      </div>
+      <p class="hint warn-text" data-speed-warn hidden>{{ icon('alert') }} فاصلهٔ کمتر از ۵ ثانیه خطر مسدود شدن حساب را بالا می‌برد.</p>
+      <label class="check"><input type="checkbox" name="skip_if_reserved" value="1" checked><span>اگر برای آن وعده رزرو داشتم، از سبد نخر</span></label>
+      <details class="mini">
+        <summary>فقط در ساعت‌های مشخص</summary>
+        <div class="grid-2">
+          <label class="field">از ساعت <input name="active_from" type="time"></label>
+          <label class="field">تا ساعت <input name="active_to" type="time"></label>
         </div>
-        <div class="meals-row">
-          <span class="muted small">وعده‌ها:</span>
-          {% set cur_meals = (active_account.auto_reserve_meals or 'ناهار,شام').split(',') %}
-          <label class="pick-inline"><input type="checkbox" name="meals" value="صبحانه" {% if 'صبحانه' in cur_meals %}checked{% endif %}><span>صبحانه</span></label>
-          <label class="pick-inline"><input type="checkbox" name="meals" value="ناهار" {% if 'ناهار' in cur_meals %}checked{% endif %}><span>ناهار</span></label>
-          <label class="pick-inline"><input type="checkbox" name="meals" value="شام" {% if 'شام' in cur_meals %}checked{% endif %}><span>شام</span></label>
-          <button class="secondary small-btn" style="margin-right:auto">ذخیره وعده‌ها</button>
-        </div>
-        <div class="auto-reserve-footer">
-          {% if active_account.last_auto_reserve %}
-            <span class="muted small">آخرین اجرا: هفته {{ active_account.last_auto_reserve }}</span>
-          {% else %}
-            <span class="muted small">آماده برای اجرای چهارشنبه</span>
-          {% endif %}
-          <button class="secondary small-btn" formaction="/account/auto-reserve/run-now" formnovalidate {% if op and op.state == 'running' %}disabled{% endif %}>
-            🚀 اجرای فوری رزرو خودکار هفته بعد
-          </button>
-        </div>
-      </form>
-    {% else %}
-      <div class="empty">ابتدا یک حساب انتخاب یا ثبت کن.</div>
+      </details>
+    </div>
+
+    <div class="sticky-submit">
+      <button class="btn primary block lg">{{ icon('play') }} شروع پیگیری</button>
+    </div>
+  </form>
+  {% endif %}
+</section>
+
+{# ============================================================== JOBS #}
+<section class="panel" id="jobs" data-panel>
+  <div class="panel-head row-between">
+    <h1>کارها</h1>
+    <div class="segmented compact" data-job-filter>
+      <label><input type="radio" name="jf" value="all" class="sr-only" checked><span>همه</span></label>
+      <label><input type="radio" name="jf" value="active" class="sr-only"><span>فعال</span></label>
+      <label><input type="radio" name="jf" value="rest" class="sr-only"><span>تمام‌شده</span></label>
+    </div>
+  </div>
+  <div data-live="jobs">
+    <div class="stats">
+      <div class="stat"><b class="c-warn">{{ active_jobs|length }}</b><span>در حال پیگیری</span></div>
+      <div class="stat"><b class="c-ok">{{ done_jobs|length }}</b><span>خریداری‌شده</span></div>
+      <div class="stat"><b>{{ jobs|length - active_jobs|length - done_jobs|length }}</b><span>متوقف / ناموفق</span></div>
+    </div>
+    {% if not jobs %}
+    <div class="empty">
+      {{ icon('list', 'empty-i') }}
+      <p>هنوز کاری ثبت نشده.</p>
+      <a class="btn primary" href="#buy">{{ icon('plus') }} اولین پیگیری</a>
+    </div>
     {% endif %}
-  </section>
-
-  <!-- Card 3: Forgot Card Receipt -->
-  <section class="card">
-    <div class="card-head">
-      <span class="step">۳</span>
-      <h2>دریافت فیش فراموشی کارت</h2>
+    <div class="jobs" data-done="{{ done_jobs|length }}">
+      {% for j in jobs %}
+      <article class="job s-{{ j.status }}" data-status="{{ j.status }}">
+        <header class="job-top">
+          <div class="job-when">{{ icon('calendar') }}<b>{{ jalali.format_jalali_short(j.date) }}</b><span class="muted">· {{ j.meal or 'هر وعده' }}</span></div>
+          <span class="badge {{ j.status }}">{{ STATUS_FA[j.status] }}</span>
+        </header>
+        <div class="job-foods">
+          {% for f in j.foods.splitlines() if f.strip() %}<span class="food">{{ f }}</span>{% endfor %}
+          {% if j.quantity > 1 %}<span class="qty">×{{ j.quantity }}</span>{% endif %}
+        </div>
+        <div class="job-meta">
+          {% if accounts|length > 1 %}<span>{{ icon('user') }} {{ j.account_name or j.site_username or 'سلف' }}</span>{% endif %}
+          <span>{{ icon('refresh') }} {% if j.attempts %}{{ j.attempts }} بررسی{% else %}هنوز بررسی نشده{% endif %}</span>
+          <span>{{ icon('clock') }} هر {{ (j.poll_seconds or poll_seconds)|num }} ثانیه</span>
+          {% if j.last_check %}<span>آخرین: {{ j.last_check|ts }}</span>{% endif %}
+        </div>
+        {% if j.message %}<p class="job-msg">{{ j.message }}</p>{% endif %}
+        <footer class="job-actions">
+          {% if j.status == 'active' %}
+            <form method="post" action="/jobs/{{ j.id }}/speed" class="speed">
+              <input name="poll_seconds" type="number" min="{{ (min_job_interval)|num }}" step="0.5" value="{{ (j.poll_seconds or poll_seconds)|num }}" inputmode="decimal" aria-label="فاصلهٔ بررسی (ثانیه)">
+              <button class="btn ghost sm">ثانیه · اعمال</button>
+            </form>
+            <form method="post" action="/jobs/{{ j.id }}/stop"><button class="btn ghost sm">{{ icon('pause') }} توقف</button></form>
+          {% else %}
+            {% if j.status != 'done' %}<form method="post" action="/jobs/{{ j.id }}/resume"><button class="btn ghost sm">{{ icon('play') }} ادامه</button></form>{% endif %}
+            <form method="post" action="/jobs/{{ j.id }}/delete"><button class="btn ghost sm danger">{{ icon('trash') }} حذف</button></form>
+          {% endif %}
+        </footer>
+      </article>
+      {% endfor %}
     </div>
-    <p class="muted small">اگر کارت دانشجویی همراهت نیست، روز و وعده را انتخاب کن تا کد یا بارکد فیش فراموشی تحویل غذا صادر شود.</p>
-    {% if active_account and active_id != 'new' %}
-      <form method="post" action="/forgot-receipt">
+  </div>
+</section>
+
+{# ============================================================== ACCOUNT #}
+<section class="panel" id="account" data-panel>
+  {% if has_acc %}
+  {% set st = statuses[active_account.id] %}
+  <div class="card acc-card">
+    <div class="acc-head">
+      <span class="avatar lg">{{ (active_account.display_name or active_account.site_username)[:1] }}</span>
+      <div class="acc-title">
+        <h1>{{ active_account.display_name or 'حساب سلف' }}</h1>
+        <span class="muted" dir="ltr">{{ active_account.site_username }}</span>
+      </div>
+    </div>
+    <div data-live="acc-status">
+      <div class="status-line {{ st.status }}"><span class="dot {{ st.status }}"></span><span>{{ st.text }}</span></div>
+      <div class="stats two">
+        <div class="stat">
+          <span>اعتبار سلف</span>
+          {% if active_account.credit %}<b class="c-ok">{{ active_account.credit }}</b>{% else %}<b class="muted">—</b>{% endif %}
+          <small class="muted">{% if active_account.credit_updated_at %}{{ active_account.credit_updated_at|ts }}{% else %}هنوز استعلام نشده{% endif %}</small>
+        </div>
+        <div class="stat">
+          <span>درخواست در این ساعت</span>
+          <b>{{ st.throttle.hits }}<small class="muted"> / {{ st.throttle.max_hits if st.throttle.max_hits else '∞' }}</small></b>
+          {% if st.throttle.max_hits %}<div class="meter{% if st.throttle.is_limited %} full{% endif %}"><i style="width: {{ [(st.throttle.hits * 100 / st.throttle.max_hits)|int, 100]|min }}%"></i></div>{% else %}<small class="muted">بدون سقف</small>{% endif %}
+        </div>
+      </div>
+    </div>
+    <div class="btn-row">
+      <form method="post" action="/account/test">
         <input type="hidden" name="account_id" value="{{ active_account.id }}">
-        <label>روز مورد نظر:
-          <select name="date">
-            {% for d in upcoming_days[:7] %}
-              <option value="{{ d.date }}" {% if d.is_today %}selected{% endif %}>{{ d.label }}</option>
-            {% endfor %}
+        <button class="btn primary" {% if running %}disabled{% endif %}>{{ icon('check') }} تست ورود</button>
+      </form>
+      <form method="post" action="/account/sync-credit">
+        <input type="hidden" name="account_id" value="{{ active_account.id }}">
+        <button class="btn ghost" {% if running %}disabled{% endif %}>{{ icon('refresh') }} استعلام موجودی</button>
+      </form>
+    </div>
+  </div>
+
+  <details class="card fold" id="charge">
+    <summary>{{ icon('card') }}<span>افزایش اعتبار</span></summary>
+    <form method="post" action="/account/pay" class="stack">
+      <input type="hidden" name="account_id" value="{{ active_account.id }}">
+      <label class="field">مبلغ
+        <div class="input-addon">
+          <input type="text" name="amount" id="chargeAmount" required placeholder="۵۰,۰۰۰" inputmode="numeric">
+          <select name="unit" aria-label="واحد"><option value="toman" selected>تومان</option><option value="rial">ریال</option></select>
+        </div>
+      </label>
+      <div class="chips">
+        {% for a in [30000, 50000, 100000, 200000] %}<button type="button" class="chip" data-amount="{{ a }}">{{ '{:,}'.format(a) }}</button>{% endfor %}
+      </div>
+      <label class="field">درگاه بانکی
+        <select name="bank">
+          <option value="0" selected>سداد (بانک ملی)</option>
+          <option value="1">به‌پرداخت ملت</option>
+        </select>
+      </label>
+      <p class="note warn">{{ icon('alert') }} سلف فقط وقتی شارژ را تأیید می‌کند که در همان مرورگر گوشی وارد سامانهٔ سلف شده باشی؛ وگرنه شاپرک پول را برمی‌گرداند.</p>
+      <button class="btn ok block" {% if running %}disabled{% endif %}>{{ icon('bolt') }} گرفتن لینک درگاه</button>
+      <a class="btn ghost block" href="https://nut.uk.ac.ir/ePay/ePay_Payment.aspx" target="_blank" rel="noopener noreferrer">{{ icon('external') }} پرداخت از سایت سلف</a>
+    </form>
+  </details>
+
+  <details class="card fold">
+    <summary>{{ icon('edit') }}<span>ویرایش اطلاعات ورود</span></summary>
+    <form method="post" action="/account" class="stack">
+      <input type="hidden" name="account_id" value="{{ active_account.id }}">
+      <label class="field">شماره دانشجویی
+        <input name="site_username" required inputmode="numeric" value="{{ active_account.site_username }}" dir="ltr">
+      </label>
+      <label class="field">نام نمایشی
+        <input name="display_name" value="{{ active_account.display_name or '' }}" placeholder="با «تست ورود» خودکار پر می‌شود">
+      </label>
+      <label class="field">رمز سامانهٔ سلف <small class="hint">خالی بگذاری، رمز قبلی می‌ماند</small>
+        <input name="site_password" type="password" autocomplete="new-password" placeholder="••••••••">
+      </label>
+      <div class="btn-row">
+        <button class="btn primary">ذخیره</button>
+        <button class="btn ghost danger" formaction="/account/delete" formnovalidate data-confirm="این حساب و کارهای فعالش حذف شوند؟">{{ icon('trash') }} حذف حساب</button>
+      </div>
+    </form>
+  </details>
+  {% else %}
+  <div class="panel-head">
+    <h1>افزودن حساب سلف</h1>
+    <p class="muted">اطلاعات ورود سامانهٔ تغذیه (nut.uk.ac.ir). رمز رمزنگاری‌شده ذخیره می‌شود. می‌توانی چند حساب اضافه کنی.</p>
+  </div>
+  <form method="post" action="/account" class="card stack">
+    <input type="hidden" name="account_id" value="0">
+    <label class="field">شماره دانشجویی
+      <input name="site_username" required inputmode="numeric" dir="ltr" autocomplete="off">
+    </label>
+    <label class="field">رمز سامانهٔ سلف
+      <input name="site_password" type="password" required autocomplete="new-password">
+    </label>
+    <label class="field">نام نمایشی <small class="hint">اختیاری</small>
+      <input name="display_name" placeholder="بعد از ورود خودکار پر می‌شود">
+    </label>
+    <button class="btn primary block lg">{{ icon('plus') }} افزودن حساب</button>
+  </form>
+  {% endif %}
+</section>
+
+{# ============================================================== TOOLS #}
+<section class="panel" id="tools" data-panel>
+  <div class="panel-head"><h1>ابزارها</h1></div>
+  {% if not has_acc %}{{ need_account() }}{% else %}
+  <div class="card stack">
+    <div class="card-title">{{ icon('calendar') }}<h2>رزرو خودکار هفتگی</h2></div>
+    <p class="muted small">هر چهارشنبه که رزرو هفتهٔ بعد باز می‌شود، ربات وعده‌های انتخابی شنبه تا چهارشنبه را رزرو می‌کند.</p>
+    <form method="post" action="/account/auto-reserve" class="stack">
+      <input type="hidden" name="account_id" value="{{ active_account.id }}">
+      <label class="switch">
+        <input type="checkbox" name="auto_reserve" value="1" {% if active_account.auto_reserve %}checked{% endif %} data-autosubmit>
+        <span class="switch-ui"></span><span>رزرو خودکار چهارشنبه‌ها</span>
+      </label>
+      {% set cur_meals = (active_account.auto_reserve_meals or 'ناهار,شام').split(',') %}
+      <div class="chips">
+        {% for m in ['صبحانه', 'ناهار', 'شام'] %}
+        <label class="chip toggle"><input type="checkbox" name="meals" value="{{ m }}" class="sr-only" {% if m in cur_meals %}checked{% endif %}><span>{{ m }}</span></label>
+        {% endfor %}
+      </div>
+      <div class="btn-row">
+        <button class="btn ghost">ذخیره وعده‌ها</button>
+        <button class="btn ghost" formaction="/account/auto-reserve/run-now" formnovalidate {% if running %}disabled{% endif %}>{{ icon('bolt') }} اجرای همین حالا</button>
+      </div>
+      <p class="muted small">{% if active_account.last_auto_reserve %}آخرین اجرا: هفتهٔ {{ active_account.last_auto_reserve }}{% else %}هنوز اجرا نشده{% endif %}</p>
+    </form>
+  </div>
+
+  <div class="card stack">
+    <div class="card-title">{{ icon('ticket') }}<h2>فیش فراموشی کارت</h2></div>
+    <p class="muted small">کارت دانشجویی همراهت نیست؟ کد فیش فراموشی تحویل غذا را بگیر.</p>
+    <form method="post" action="/forgot-receipt" class="stack">
+      <input type="hidden" name="account_id" value="{{ active_account.id }}">
+      <label class="field">روز
+        <select name="date">
+          {% for d in upcoming_days[:7] %}<option value="{{ d.date }}" {% if d.is_today %}selected{% endif %}>{{ d.label }}</option>{% endfor %}
+        </select>
+      </label>
+      <div class="grid-2">
+        <label class="field">وعده
+          <select name="meal">
+            <option value="ناهار" selected>ناهار</option>
+            <option value="شام">شام</option>
+            <option value="صبحانه">صبحانه</option>
           </select>
         </label>
-        <div class="row">
-          <label>وعده غذایی:
-            <select name="meal">
-              <option value="ناهار" selected>ناهار</option>
-              <option value="شام">شام</option>
-              <option value="صبحانه">صبحانه</option>
-            </select>
-          </label>
-          <label>نوع رزرو غذا:
-            <select name="reserve_type">
-              <option value="0" selected>رزرو هفتگی</option>
-              <option value="2">سبد غذایی</option>
-              <option value="1">روزفروش</option>
-            </select>
-          </label>
-        </div>
-        <button class="primary" {% if op and op.state == 'running' %}disabled{% endif %} style="margin-top:auto">
-          🎫 دریافت کد فیش فراموشی
-        </button>
-      </form>
-    {% else %}
-      <div class="empty">ابتدا یک حساب انتخاب یا ثبت کن.</div>
-    {% endif %}
-  </section>
-
-  <!-- Card 4: Account Details & Credentials -->
-  <section class="card">
-    {% if active_account and active_id != 'new' %}
-      <div class="card-head">
-        <span class="step">۴</span>
-        <h2>اطلاعات ورود سلف: {{ active_account.display_name or active_account.site_username }}</h2>
+        <label class="field">نوع رزرو
+          <select name="reserve_type">
+            <option value="0" selected>رزرو هفتگی</option>
+            <option value="2">سبد غذایی</option>
+            <option value="1">روزفروش</option>
+          </select>
+        </label>
       </div>
-      <div class="saved">
-        رمز برای <b>{{ active_account.display_name or 'این حساب' }}</b> ({{ active_account.site_username }}) ذخیره است.
-      </div>
-      <form method="post" action="/account">
-        <input type="hidden" name="account_id" value="{{ active_account.id }}">
-        <label>شماره دانشجویی
-          <input name="site_username" required inputmode="numeric" value="{{ active_account.site_username }}">
-        </label>
-        <label>نام دانشجو (در سامانهٔ سلف)
-          <input name="display_name" value="{{ active_account.display_name or '' }}" placeholder="با زدن «تست ورود» خودکار استخراج می‌شود">
-        </label>
-        <label>رمز سامانهٔ سلف
-          <input name="site_password" type="password" autocomplete="new-password" placeholder="•••••••• ذخیره شده — فقط برای تغییر بنویس">
-        </label>
-        <div class="btns form-footer-action">
-          <button>ذخیره تغییرات</button>
-          <button class="secondary" formaction="/account/test" formnovalidate {% if op and op.state == 'running' %}disabled{% endif %}>
-            تست ورود و دریافت مشخصات
-          </button>
-          <button class="secondary danger-btn" formaction="/account/delete" formnovalidate onclick="return confirm('آیا این حساب و کارهای مربوط به آن حذف شوند؟')">
-            حذف حساب
-          </button>
-        </div>
-      </form>
-    {% else %}
-      <div class="card-head">
-        <span class="step">۴</span>
-        <h2>افزودن حساب جدید سلف</h2>
-      </div>
-      <form method="post" action="/account">
-        <input type="hidden" name="account_id" value="0">
-        <label>شماره دانشجویی
-          <input name="site_username" required inputmode="numeric" placeholder="مثلاً 402407036">
-        </label>
-        <label>نام دانشجو (اختیاری — پس از ورود خودکار پر می‌شود)
-          <input name="display_name" placeholder="مثلاً معین فیروزآبادی">
-        </label>
-        <label>رمز سامانهٔ سلف
-          <input name="site_password" type="password" required autocomplete="new-password">
-        </label>
-        <div class="btns form-footer-action">
-          <button>افزودن حساب</button>
-        </div>
-      </form>
-    {% endif %}
-  </section>
-</div>
-
-<section class="card" style="margin-top:24px">
-  <div class="card-head">
-    <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg></span>
-    <h2>کارها</h2>
-    {% if jobs %}<span class="badge count">{{ jobs|length }}</span>{% endif %}
+      <button class="btn primary block" {% if running %}disabled{% endif %}>{{ icon('ticket') }} گرفتن کد فیش</button>
+    </form>
   </div>
-  {% if not jobs %}<div class="empty">هنوز کاری ثبت نشده. از فرم بالا اولین پیگیری را شروع کن.</div>{% endif %}
-  <div class="jobs">
-    {% for j in jobs %}
-    <div class="job">
-      <div class="job-date">
-        <b>{{ jalali.format_jalali_short(j.date) }}</b>
-        <span>{{ j.meal or 'هر وعده' }}</span>
-        <small class="muted" dir="ltr">{{ j.date }}</small>
-      </div>
-      <div>
-        <div class="job-foods">
-          <span class="job-acc-chip">👤 {{ j.account_name or j.site_username or 'سلف' }}</span>
-          {{ j.foods.splitlines()|join('، ') }} <span class="qty">×{{ j.quantity }}</span>
-        </div>
-        <span class="badge {{ j.status }}">{{ STATUS_FA[j.status] }}</span>
-        <span class="job-meta">
-          {% if j.attempts %}تلاش {{ j.attempts }}{% else %}هنوز بررسی نشده{% endif %}
-          · هر {{ (j.poll_seconds or poll_seconds)|round(1)|replace('.0', '') }} ثانیه
-          {% if j.last_check %}· آخرین بررسی {{ j.last_check|ts }}{% endif %}
-        </span>
-        {% if j.message %}<div class="job-msg">{{ j.message }}</div>{% endif %}
-      </div>
-      <div class="actions">
-        {% if j.status == 'active' %}
-          <form method="post" action="/jobs/{{ j.id }}/speed" class="speed" title="فاصلهٔ بین بررسی‌ها (ثانیه)">
-            <input name="poll_seconds" type="number" min="1" step="0.5" value="{{ (j.poll_seconds or poll_seconds)|round(1)|replace('.0', '') }}" aria-label="ثانیه">
-            <button class="link">تغییر سرعت</button>
-          </form>
-          <form method="post" action="/jobs/{{ j.id }}/stop"><button class="link">توقف</button></form>
-        {% else %}
-          {% if j.status != 'done' %}<form method="post" action="/jobs/{{ j.id }}/resume"><button class="link">ادامه</button></form>{% endif %}
-          <form method="post" action="/jobs/{{ j.id }}/delete"><button class="link danger">حذف</button></form>
-        {% endif %}
-      </div>
-    </div>
-    {% endfor %}
-  </div>
+  {% endif %}
 </section>
 
-<section class="card">
-  <div class="card-head">
-    <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
-    <h2>گزارش</h2>
+{# ============================================================== LOGS #}
+<section class="panel" id="logs" data-panel>
+  <div class="panel-head"><h1>گزارش</h1></div>
+  <div class="card" data-live="logs">
+    {% if not logs %}<div class="empty">{{ icon('clock', 'empty-i') }}<p>هنوز گزارشی نیست.</p></div>{% endif %}
+    <ul class="logs">
+      {% for l in logs %}<li class="{{ l.level }}"><span class="msg">{{ l.message }}</span><time>{{ l.created_at|ts }}</time></li>{% endfor %}
+    </ul>
   </div>
-  {% if not logs %}<div class="empty">هنوز گزارشی نیست.</div>{% endif %}
-  <ul class="logs">
-    {% for l in logs %}<li class="{{ l.level }}"><time>{{ l.created_at|ts }}</time><span class="msg" title="{{ l.message }}">{{ l.message }}</span></li>{% endfor %}
-  </ul>
 </section>
-
-<script>
-function selectDate(dateVal, labelText, btnEl) {
-  var input = document.getElementById('mainDateInput');
-  if (input) {
-    input.value = dateVal;
-    input.dispatchEvent(new Event('change'));
-  }
-  var badge = document.getElementById('selectedDateBadge');
-  if (badge) badge.innerText = labelText + ' (' + dateVal + ')';
-  document.querySelectorAll('.date-pill').forEach(function(el) { el.classList.remove('selected'); });
-  if (btnEl) btnEl.classList.add('selected');
-}
-function updateDateBadge(dateVal) {
-  var badge = document.getElementById('selectedDateBadge');
-  if (badge) badge.innerText = dateVal;
-}
-function toggleChargeForm() {
-  var el = document.getElementById('chargeDrawer');
-  if (!el) return;
-  el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none';
-  if (el.style.display === 'block') {
-    var inp = document.getElementById('chargeAmountInput');
-    if (inp) inp.focus();
-  }
-}
-function setChargeAmount(val) {
-  var inp = document.getElementById('chargeAmountInput');
-  if (inp) {
-    inp.value = val.toLocaleString();
-    inp.focus();
-  }
-}
-var activeAccountId = {{ active_account.id if (active_account and active_id != 'new') else 0 }};
-function checkAccountHealth(manual) {
-  if (!activeAccountId) return;
-  var txt = document.getElementById('sessionStatusText');
-  var dot = document.querySelector('.status-indicator-dot');
-  if (manual && txt) {
-    txt.innerText = 'در حال بررسی اتصال…';
-  }
-  fetch('/api/account/health?account_id=' + activeAccountId)
-    .then(function(res) { return res.json(); })
-    .then(function(data) {
-      if (!data) return;
-      if (dot) {
-        dot.className = 'status-indicator-dot ' + (data.status || 'unknown');
-      }
-      if (txt && data.status_text) {
-        txt.innerText = data.status_text;
-      }
-      if (data.credit) {
-        var cr = document.querySelector('.credit-amount strong');
-        if (cr) cr.innerText = data.credit;
-        var placeholder = document.querySelector('.credit-not-synced');
-        if (placeholder) placeholder.innerHTML = '<strong>' + data.credit + '</strong>';
-      }
-      if (data.credit_updated_at) {
-        var tm = document.querySelector('.finance-time');
-        if (tm) {
-          tm.innerText = 'آخرین استعلام: ' + data.credit_updated_at;
-        }
-      }
-    })
-    .catch(function(err) {
-      console.log('health check error', err);
-    });
-}
-if (activeAccountId > 0) {
-  checkAccountHealth();
-  setInterval(function() { checkAccountHealth(); }, 30000);
-}
-</script>
 {% endblock %}

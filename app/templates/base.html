@@ -2,24 +2,35 @@
 <html lang="fa" dir="rtl">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
-  <title>سلف خودکار</title>
+  <meta name="theme-color" content="#f6f4ef" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111315" media="(prefers-color-scheme: dark)">
+  <title>{% block title %}سلف خودکار{% endblock %}</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23e39a10'/%3E%3Ccircle cx='16' cy='17' r='7.5' fill='none' stroke='%23241a05' stroke-width='2.2'/%3E%3C/svg%3E">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700&display=swap" rel="stylesheet">
-  {# Relative URL: behind the HTTPS proxy url_for() would build an http:// link that browsers block. #}
-  <link rel="stylesheet" href="/static/style.css">
-  {% block head %}{% endblock %}
+  <script>
+    // Apply the saved theme before first paint.
+    try { var t = localStorage.getItem('theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+    document.documentElement.classList.add('js');
+  </script>
+  {# Font is self-hosted: Google Fonts is slow or blocked from Iran. Relative URLs work behind the HTTPS proxy. #}
+  <link rel="preload" href="/static/fonts/Vazirmatn.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/static/style.css?v=3">
+  <script src="/static/app.js?v=3" defer></script>
 </head>
-<body>
-  {% from "_ui.html" import mark %}
+<body class="{% block body_class %}{% endblock %}" {% block body_attrs %}{% endblock %}>
+  {% from "_ui.html" import mark, icon %}
   <header class="top">
-    <a class="brand" href="/">{{ mark() }}<span class="brand-name">سلف خودکار<small>رزرو خودکار غذا</small></span></a>
+    <a class="brand" href="/">{{ mark() }}<span class="brand-name">سلف خودکار<small>خرید خودکار از سبد غذایی</small></span></a>
     {% block header_extra %}{% endblock %}
   </header>
-  <main>
-    {% if flash %}<div class="flash" role="status">{{ flash }}</div>{% endif %}
+  {% if flash %}
+  <div class="toast" role="status" data-toast>
+    <span>{{ flash }}</span>
+    <button type="button" class="toast-x" aria-label="بستن" data-toast-close>{{ icon('x') }}</button>
+  </div>
+  {% endif %}
+  <main class="wrap">
     {% block content %}{% endblock %}
   </main>
 </body>

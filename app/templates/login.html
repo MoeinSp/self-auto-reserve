@@ -1,34 +1,51 @@
 {% extends "base.html" %}
-{% from "_ui.html" import mark %}
+{% from "_ui.html" import mark, icon %}
+{% block body_class %}auth-page{% endblock %}
 {% block content %}
 <section class="hero">
   {{ mark() }}
   <h1>غذای دلخواهت را از دست نده</h1>
-  <p>ربات سبد غذایی سلف را برایت زیر نظر می‌گیرد و به محض پیدا شدن غذای موردنظر، خودکار خریدش می‌کند.</p>
-  <ul class="features">
-    <li>پیگیری خودکار سبد</li>
-    <li>اولویت‌بندی غذاها</li>
-    <li>رمز سامانه رمزنگاری‌شده</li>
-  </ul>
+  <p>ربات سبد غذایی سلف را برایت زیر نظر می‌گیرد و هر وقت غذای موردنظرت آمد، خودکار آن را می‌خرد.</p>
 </section>
-<div class="grid2 auth">
-  <section class="card">
-    <div class="card-head"><span class="step">۱</span><h2>ورود به پنل</h2></div>
-    <form method="post" action="/login">
-      <label>نام کاربری پنل <input name="username" required autocomplete="username"></label>
-      <label>رمز پنل <input name="password" type="password" required autocomplete="current-password"></label>
-      <button class="block">ورود</button>
-    </form>
-  </section>
-  <section class="card">
-    <div class="card-head"><span class="step">+</span><h2>ثبت‌نام</h2></div>
-    <form method="post" action="/register">
-      <label>نام کاربری پنل <input name="username" required autocomplete="username"></label>
-      <label>رمز پنل (حداقل ۸ کاراکتر) <input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
-      {% if invite %}<label>کد دعوت <input name="invite" required autocomplete="off"></label>{% endif %}
-      <p class="note">این رمز فقط برای همین پنل است، نه سامانهٔ سلف.</p>
-      <button class="secondary block">ثبت‌نام</button>
-    </form>
-  </section>
+
+<div class="auth-card card">
+  <input type="radio" name="auth-tab" id="tab-login" class="sr-only" checked>
+  <input type="radio" name="auth-tab" id="tab-register" class="sr-only">
+  <div class="segmented auth-switch" role="tablist">
+    <label for="tab-login">ورود</label>
+    <label for="tab-register">ثبت‌نام</label>
+  </div>
+
+  <form method="post" action="/login" class="stack auth-login">
+    <label class="field">نام کاربری پنل
+      <input name="username" required autocomplete="username" autocapitalize="none" spellcheck="false">
+    </label>
+    <label class="field">رمز پنل
+      <input name="password" type="password" required autocomplete="current-password">
+    </label>
+    <button class="btn primary block lg">ورود</button>
+  </form>
+
+  <form method="post" action="/register" class="stack auth-register">
+    <label class="field">نام کاربری پنل
+      <input name="username" required autocomplete="username" autocapitalize="none" spellcheck="false">
+    </label>
+    <label class="field">رمز پنل <small class="hint">حداقل ۸ کاراکتر</small>
+      <input name="password" type="password" minlength="8" required autocomplete="new-password">
+    </label>
+    {% if invite %}
+    <label class="field">کد دعوت <small class="hint">از کسی که پنل را راه انداخته بگیر</small>
+      <input name="invite" required autocomplete="off" autocapitalize="none" dir="ltr">
+    </label>
+    {% endif %}
+    <p class="note">{{ icon('shield') }} این رمز فقط برای همین پنل است، نه رمز سامانهٔ سلف.</p>
+    <button class="btn primary block lg">ساخت حساب</button>
+  </form>
 </div>
+
+<ul class="features">
+  <li>{{ icon('basket') }} پیگیری خودکار سبد</li>
+  <li>{{ icon('list') }} اولویت‌بندی غذاها</li>
+  <li>{{ icon('shield') }} رمز سامانه رمزنگاری‌شده</li>
+</ul>
 {% endblock %}
