@@ -179,6 +179,7 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         menu = db.week_menu("1405/08/02")
         self.assertEqual(len(menu), 14)
         self.assertEqual(menu["1405/08/05"]["ناهار"], ["قیمه"])
+        self.assertEqual(menu["1405/08/05"], {"صبحانه": [], "ناهار": ["قیمه"], "شام": []})  # empty meals kept
         self.assertEqual(menu["1405/08/12"]["شام"], ["ماکارونی", "کتلت"])
 
 

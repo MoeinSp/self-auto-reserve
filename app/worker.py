@@ -10,7 +10,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
 
 from . import captcha, config, db, jalali, security
-from .cullinan import Attempt, CullinanClient, Job, LoginFailed, SiteError, launch_browser
+from .cullinan import WEEK_GRIDS, Attempt, CullinanClient, Job, LoginFailed, SiteError, launch_browser
 from .ratelimit import RateLimited, Throttle
 from .text import parse_foods
 
@@ -341,7 +341,8 @@ class Worker:
                             raise
                         continue  # next week not published yet
                     for day, meals in found.items():
-                        week[day] = {meal: info["foods"] for meal, info in meals.items()}
+                        # Every meal is kept, empty when the site has nothing for it that day.
+                        week[day] = {meal: meals.get(meal, {}).get("foods", []) for meal in WEEK_GRIDS}
                 if not any(foods for meals in week.values() for foods in meals.values()):
                     raise SiteError("در برنامهٔ غذایی این هفته غذایی پیدا نشد.")
                 db.save_week_menu(week)

@@ -440,6 +440,8 @@ details.fold > form, details.fold > div { padding: 0 16px 16px; }
 @media (min-width: 560px) { .meals { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); } }
 .meal { margin: 0; padding: 10px 12px 12px; min-width: 0; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface-2); }
 .meal legend { padding: 0 6px; font-weight: 800; font-size: 14px; }
+.meal.empty-meal { border-style: dashed; background: transparent; }
+.meal.empty-meal legend { color: var(--muted); }
 .res { display: flex; align-items: center; gap: 4px; margin-bottom: 6px; font-size: 12px; color: var(--muted); }
 .res .i { width: 14px; height: 14px; }
 .res.yes { color: var(--ok); font-weight: 700; }

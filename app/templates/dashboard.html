@@ -138,13 +138,14 @@
       <div class="day-menu" data-menu-date="{{ day }}"{% if day != today %} hidden{% endif %}>
         <div class="muted small">غذاهای <b>{{ jalali.format_jalali_short(day) }}</b></div>
         <div class="meals">
-          {% for meal, foods in meals.items() %}
-          <fieldset class="meal">
-            <legend>{{ meal or 'غذاها' }}</legend>
-            {% for f in foods %}
+          {# Always all three meals, in order; a meal the site has no foods for gets an empty slot. #}
+          {% for meal in MEALS if meal %}
+          <fieldset class="meal{% if not meals.get(meal) %} empty-meal{% endif %}">
+            <legend>{{ meal }}</legend>
+            {% for f in meals.get(meal, []) %}
             <label class="pick"><input type="checkbox" name="picks" value="{{ meal }}|{{ f }}"><span>{{ f }}</span>{{ icon('check', 'pick-i') }}</label>
             {% else %}
-            <p class="muted small">غذایی تعریف نشده</p>
+            <p class="muted small">برای این وعده غذایی ثبت نشده</p>
             {% endfor %}
           </fieldset>
           {% endfor %}
