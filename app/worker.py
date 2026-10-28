@@ -32,6 +32,7 @@ def _in_window(job_row) -> bool:
 
 OP_TIMEOUT = 600  # covers a manual captcha wait (CAPTCHA_MANUAL_TIMEOUT)
 RESERVATION_RECHECK = 600  # seconds between "is this meal already reserved?" checks per job
+PRIORITY_COLUMNS = {"صبحانه": "priority_breakfast", "ناهار": "priority_lunch", "شام": "priority_dinner"}
 AUTO_RESERVE_RETRY = 3600  # seconds before a failed scheduled auto-reserve is tried again
 WEEK_MENU_AUTO_KEY = "week_menu_auto"  # settings key: date of the last scheduled week-menu refresh
 
@@ -54,6 +55,19 @@ def _explain(exc: Exception) -> str:
     return "خطای غیرمنتظره رخ داد؛ اگر تکرار شد به مدیر پنل خبر بده."
 
 
+def priorities(acc) -> dict[str, list[str]]:
+    """The account's food priorities for auto-reserve: {meal: [wanted, ...]}, highest first.
+
+    Breakfast's milk preference goes first: "flavored" -> شیر طعم دار, "plain" -> شیر (not flavored).
+    """
+    if not acc:
+        return {}
+    out = {meal: parse_foods(acc[col] or "") for meal, col in PRIORITY_COLUMNS.items()}
+    milk = {"flavored": ["شیر طعم دار"], "plain": ["شیر -طعم"]}.get(acc["milk_pref"] or "", [])
+    out["صبحانه"] = milk + out["صبحانه"]
+    return out
+
+
 PAYMENT_SESSIONS: dict[str, dict] = {}
 
 
@@ -69,6 +83,7 @@ class Worker:
         self.reservation_checked: dict[int, float] = {}  # job id -> monotonic time of last check
         self.menu_refreshing = False  # one shared week-menu refresh at a time
         self.menu_auto_tried = 0.0  # time of the last scheduled refresh attempt
+        self.login_throttles: dict[str, Throttle] = {}  # student number -> Throttle, for sign-in with site account
         self.auto_reserve_tried: dict[int, float] = {}  # account id -> time of the last scheduled auto-reserve
         self._pw = None
         self.browser = None
@@ -127,6 +142,23 @@ class Worker:
             except Exception:
                 log.exception("supervisor error")
             await asyncio.sleep(5)
+
+    async def verify_site_login(self, username: str, password: str) -> dict:
+        """Log in to the university site with these credentials (panel sign-in without a panel
+        account); returns the profile. Raises LoginFailed / RateLimited / SiteError."""
+        throttle = self.login_throttles.setdefault(username, Throttle())
+
+        async def solve(png: bytes, attempt: int) -> str | None:
+            if attempt <= captcha.config.CAPTCHA_OCR_TRIES:
+                return await asyncio.to_thread(captcha.ocr, png)
+            return None  # nobody to ask yet: the user isn't signed in
+
+        client = CullinanClient(self.browser, username, password, throttle.lane(), solve)
+        try:
+            await asyncio.wait_for(client.login(), 120)
+            return await client.read_profile()
+        finally:
+            await client.close()
 
     def throttle(self, account_id: int) -> Throttle:
         # Kept across task restarts so limits survive a job being re-created.
@@ -232,7 +264,14 @@ class Worker:
                 )
             tries = f"، کپچا در تلاش {client.captcha_attempts} حل شد" if client.captcha_attempts > 1 else ""
             credit_str = f" · اعتبار سلف: {credit}" if credit else ""
-            return f"ورود موفق بود. نام در سامانه: «{name}» ({time.monotonic() - started:.0f} ثانیه{tries}{credit_str})."
+            # Right after logging in, read what this account has bought this week and next.
+            try:
+                await self._sync_weeks(client, account_id)
+                count = sum(len(m) for m in db.reservations(account_id, jalali.today_str()).values())
+                res_str = f" · {count} وعدهٔ رزروشده" if count else " · وعدهٔ رزروشده‌ای نداری"
+            except SiteError as exc:
+                res_str = f" · رزروها خوانده نشد ({exc})"
+            return f"ورود موفق بود. نام در سامانه: «{name}» ({time.monotonic() - started:.0f} ثانیه{tries}{credit_str}{res_str})."
 
         return self.start_op(user_id, "تست ورود", run, account_id=account_id)
 
@@ -280,7 +319,7 @@ class Worker:
         async def run(client: CullinanClient) -> str:
             await client.login()
             with db.tx() as c:
-                acc = c.execute("SELECT auto_reserve_meals FROM accounts WHERE id = ?", (account_id,)).fetchone()
+                acc = c.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
             meals_str = acc["auto_reserve_meals"] if acc and acc["auto_reserve_meals"] else "ناهار,شام"
             meals = [m.strip() for m in meals_str.split(",") if m.strip()]
 
@@ -289,9 +328,13 @@ class Worker:
                 next_week = jalali.get_next_week_days()
                 target = next_week[0]["date"] if next_week else jalali.today_str()
 
-            results = await client.auto_reserve_week(target, meals)
+            results = await client.auto_reserve_week(target, meals, priorities(acc))
             with db.tx() as c:
                 c.execute("UPDATE accounts SET last_auto_reserve = ? WHERE id = ?", (target, account_id))
+            try:
+                await self._sync_weeks(client, account_id)  # show the new reservations in the panel
+            except SiteError:
+                pass
 
             summary = "؛ ".join(results) if results else "موردی برای رزرو جدید پیدا نشد یا تمام وعده‌ها از قبل رزرو شده بودند."
             db.log(user_id, f"🤖 رزرو خودکار هفته {target}: {summary}", "info")
@@ -326,6 +369,44 @@ class Worker:
 
         return self.start_op(user_id, "ایجاد لینک درگاه پرداخت", run, account_id=account_id)
 
+    async def _sync_weeks(self, client: CullinanClient, account_id: int) -> dict[str, dict[str, list[str]]]:
+        """Read this week and next week from the reservation page; store the shared menu
+        and this account's reservations. Returns the stored menu {date: {meal: [food, ...]}}."""
+        found: dict[str, dict[str, dict]] = {}
+        next_week = jalali.get_next_week_days()
+        for target in [jalali.today_str()] + ([next_week[0]["date"]] if next_week else []):
+            if target in found:
+                continue
+            try:
+                found.update(await client.read_week(target))
+            except SiteError:
+                if not found:
+                    raise
+                # next week not published yet
+        stored = db.week_menu(min(found)) if found else {}
+        week: dict[str, dict[str, list[str]]] = {}
+        for day, meals in found.items():
+            # Every meal is kept, empty when the site has nothing for it that day. A meal
+            # whose grid was missing from the page keeps the foods saved before.
+            old = stored.get(day, {})
+            week[day] = {meal: meals[meal]["foods"] if meal in meals else old.get(meal, []) for meal in WEEK_GRIDS}
+        if not any(foods for meals in week.values() for foods in meals.values()):
+            raise SiteError("در برنامهٔ غذایی این هفته غذایی پیدا نشد.")
+        db.save_week_menu(week)
+        db.save_reservations(account_id, {
+            day: {meal: info["reserved"] for meal, info in meals.items()} for day, meals in found.items()
+        })
+        return week
+
+    def check_reservations(self, user_id: int, account_id: int) -> bool:
+        """Read which meals of this week and next week the account has bought."""
+        async def run(client: CullinanClient) -> str:
+            await self._sync_weeks(client, account_id)
+            count = sum(len(m) for m in db.reservations(account_id, jalali.today_str()).values())
+            return f"رزروها بررسی شد: {count} وعدهٔ رزروشده از امروز تا آخر هفتهٔ بعد." if count else                 "رزروها بررسی شد: از امروز تا آخر هفتهٔ بعد وعدهٔ رزروشده‌ای نداری."
+
+        return self.start_op(user_id, "بررسی رزروهای هفته", run, account_id=account_id)
+
     def refresh_week_menu(self, user_id: int, account_id: int, auto: bool = False) -> bool:
         """Read this week's and next week's menu once and store it for everyone."""
         if self.menu_refreshing:
@@ -334,29 +415,7 @@ class Worker:
 
         async def run(client: CullinanClient) -> str:
             try:
-                week: dict[str, dict[str, list[str]]] = {}
-                next_week = jalali.get_next_week_days()
-                for target in [jalali.today_str()] + ([next_week[0]["date"]] if next_week else []):
-                    if target in week:
-                        continue
-                    try:
-                        found = await client.read_week(target)
-                    except SiteError:
-                        if not week:
-                            raise
-                        continue  # next week not published yet
-                    stored = db.week_menu(min(found)) if found else {}
-                    for day, meals in found.items():
-                        # Every meal is kept, empty when the site has nothing for it that day. A meal
-                        # whose grid was missing from the page keeps the foods saved before.
-                        old = stored.get(day, {})
-                        week[day] = {
-                            meal: meals[meal]["foods"] if meal in meals else old.get(meal, [])
-                            for meal in WEEK_GRIDS
-                        }
-                if not any(foods for meals in week.values() for foods in meals.values()):
-                    raise SiteError("در برنامهٔ غذایی این هفته غذایی پیدا نشد.")
-                db.save_week_menu(week)
+                week = await self._sync_weeks(client, account_id)
                 if auto:
                     db.set_setting(WEEK_MENU_AUTO_KEY, jalali.today_str())
                 days = sorted(week)
@@ -459,9 +518,13 @@ class Worker:
             await client.close()
 
     async def _reserved_food(self, client: CullinanClient, row) -> str:
-        """The food already reserved for the job's meal ("" if none), checked now and then."""
-        if not row["skip_if_reserved"] or not row["meal"]:
+        """The food already reserved for the job's meal ("" if none): with a reservation the site
+        refuses basket purchases, so the job stops. Saved reservations first, the site now and then."""
+        if not row["meal"]:
             return ""
+        saved = db.reservations(row["account_id"], row["date"]).get(row["date"], {}).get(row["meal"])
+        if saved:
+            return saved
         last = self.reservation_checked.get(row["id"])
         if last is not None and time.monotonic() - last < RESERVATION_RECHECK:
             return ""

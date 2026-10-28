@@ -9,12 +9,31 @@
 </section>
 
 <div class="auth-card card">
-  <input type="radio" name="auth-tab" id="tab-login" class="sr-only" checked>
+  <input type="radio" name="auth-tab" id="tab-site" class="sr-only" checked>
+  <input type="radio" name="auth-tab" id="tab-login" class="sr-only">
   <input type="radio" name="auth-tab" id="tab-register" class="sr-only">
   <div class="segmented auth-switch" role="tablist">
-    <label for="tab-login">ورود</label>
+    <label for="tab-site">ورود با سلف</label>
+    <label for="tab-login">ورود پنل</label>
     <label for="tab-register">ثبت‌نام</label>
   </div>
+
+  <form method="post" action="/login/site" class="stack auth-site">
+    <p class="muted small">بدون ثبت‌نام: با شماره دانشجویی و رمز سامانهٔ سلف وارد شو. ربات یک بار وارد سایت دانشگاه می‌شود تا رمز را بررسی کند (چند ثانیه طول می‌کشد).</p>
+    <label class="field">شماره دانشجویی
+      <input name="site_username" required inputmode="numeric" autocomplete="username" dir="ltr">
+    </label>
+    <label class="field">رمز سامانهٔ سلف
+      <input name="site_password" type="password" required autocomplete="current-password" dir="ltr">
+    </label>
+    {% if invite %}
+    <label class="field">کد دعوت <small class="hint">فقط بار اول لازم است</small>
+      <input name="invite" autocomplete="off" autocapitalize="none" dir="ltr">
+    </label>
+    {% endif %}
+    <p class="note">{{ icon('shield') }} رمز سلف رمزنگاری‌شده ذخیره می‌شود و فقط برای ورود ربات به سامانه به کار می‌رود.</p>
+    <button class="btn primary block lg">ورود</button>
+  </form>
 
   <form method="post" action="/login" class="stack auth-login">
     <label class="field">نام کاربری پنل

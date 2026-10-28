@@ -75,6 +75,15 @@ CREATE TABLE IF NOT EXISTS week_menu (
     data TEXT NOT NULL,            -- JSON: {meal: [food, ...]}
     fetched_at REAL NOT NULL
 );
+-- What each site account has reserved, per day, read from the reservation page
+-- (this week and next) on login, on demand, and after an auto-reserve.
+CREATE TABLE IF NOT EXISTS reservations (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    data TEXT NOT NULL,            -- JSON: {meal: reserved food or ""}
+    fetched_at REAL NOT NULL,
+    PRIMARY KEY (account_id, date)
+);
 -- Admin-editable runtime settings (rate limits), see app/limits.py.
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -129,6 +138,12 @@ MIGRATIONS = [
     ("accounts", "login_state", "TEXT NOT NULL DEFAULT ''"),
     ("accounts", "login_message", "TEXT NOT NULL DEFAULT ''"),
     ("accounts", "login_at", "REAL NOT NULL DEFAULT 0"),
+    ("accounts", "reservations_at", "REAL NOT NULL DEFAULT 0"),  # last read of the account's reservations
+    # Auto-reserve food priorities: one food per line, highest first.
+    ("accounts", "priority_breakfast", "TEXT NOT NULL DEFAULT ''"),
+    ("accounts", "priority_lunch", "TEXT NOT NULL DEFAULT ''"),
+    ("accounts", "priority_dinner", "TEXT NOT NULL DEFAULT ''"),
+    ("accounts", "milk_pref", "TEXT NOT NULL DEFAULT ''"),  # breakfast: '' | plain | flavored
 ]
 
 # An earlier version created user "admin" with this password, published in the
@@ -326,3 +341,30 @@ def week_menu(from_date: str) -> dict[str, dict[str, list[str]]]:
     with tx() as c:
         rows = c.execute("SELECT date, data FROM week_menu WHERE date >= ? ORDER BY date", (from_date,)).fetchall()
     return {r["date"]: json.loads(r["data"]) for r in rows}
+
+
+def save_reservations(account_id: int, week: dict[str, dict[str, str]]) -> None:
+    """Store {date: {meal: reserved food or ""}} read for one account."""
+    now = time.time()
+    with tx() as c:
+        c.executemany(
+            "INSERT INTO reservations (account_id, date, data, fetched_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(account_id, date) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at",
+            [(account_id, day, json.dumps(meals, ensure_ascii=False), now) for day, meals in week.items()],
+        )
+        c.execute("UPDATE accounts SET reservations_at = ? WHERE id = ?", (now, account_id))
+
+
+def reservations(account_id: int, from_date: str) -> dict[str, dict[str, str]]:
+    """Reserved foods of an account from `from_date` on: {date: {meal: food}} (only reserved meals)."""
+    with tx() as c:
+        rows = c.execute(
+            "SELECT date, data FROM reservations WHERE account_id = ? AND date >= ? ORDER BY date",
+            (account_id, from_date),
+        ).fetchall()
+    out = {}
+    for r in rows:
+        meals = {m: f for m, f in json.loads(r["data"]).items() if f}
+        if meals:
+            out[r["date"]] = meals
+    return out

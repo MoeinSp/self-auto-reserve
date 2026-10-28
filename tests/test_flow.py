@@ -135,10 +135,15 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
 
         fake_site.MENU["1405/08/05"] = {"ناهار": {"foods": ["جوجه کباب"], "reserved": "جوجه کباب"}}
         c = self.client()
-        row = {"id": 9, "skip_if_reserved": 1, "meal": "ناهار", "date": "1405/08/05"}
+        row = {"id": 9, "account_id": 999, "meal": "ناهار", "date": "1405/08/05"}
         self.assertEqual(await Worker()._reserved_food(c, row), "جوجه کباب")
-        self.assertEqual(await Worker()._reserved_food(c, {**row, "skip_if_reserved": 0}), "")
         await c.close()
+        # A reservation saved for the account answers without opening the site.
+        with db.tx() as conn:
+            conn.execute("INSERT OR IGNORE INTO users (id, username, password_hash, created_at) VALUES (1, 'u', 'x$y', 0)")
+            conn.execute("INSERT OR IGNORE INTO accounts (id, user_id, site_username, site_password_enc) VALUES (998, 1, '9', 'e')")
+        db.save_reservations(998, {"1405/08/06": {"شام": "عدسی", "ناهار": ""}})
+        self.assertEqual(await Worker()._reserved_food(None, {**row, "account_id": 998, "id": 10, "meal": "شام", "date": "1405/08/06"}), "عدسی")
 
     async def test_check_basket_is_quick(self):
         # Real throttle settings: an on-demand test must not wait the polling interval.
@@ -156,6 +161,40 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
             await c.login()
         await c.close()
 
+    async def test_sign_in_with_site_account_without_registering(self):
+        from unittest import mock
+
+        from starlette.requests import Request
+
+        from app import captcha, web
+
+        web.worker.browser = self.browser
+        web.worker.login_throttles.clear()
+        with mock.patch.object(captcha, "ocr", return_value=fake_site.CAPTCHA):
+            req = Request({"type": "http", "session": {}})
+            res = await web.login_with_site(req, site_username=fake_site.USER, site_password=fake_site.PASSWORD)
+            uid = req.session["uid"]
+            with db.tx() as c:
+                user = c.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+                acc = c.execute("SELECT * FROM accounts WHERE user_id = ?", (uid,)).fetchall()
+            self.assertEqual(user["username"], fake_site.USER + "@self")
+            self.assertFalse(web.security.verify_password("", user["password_hash"]))  # no panel password
+            self.assertEqual([a["site_username"] for a in acc], [fake_site.USER])
+            self.assertEqual(acc[0]["display_name"], "معین فیروزآبادی")
+            self.assertEqual(web.security.decrypt(acc[0]["site_password_enc"]), fake_site.PASSWORD)
+            self.assertIn("#reserves", res.headers["location"])
+            # Signing in again reuses the same panel user and account.
+            req2 = Request({"type": "http", "session": {}})
+            await web.login_with_site(req2, site_username=fake_site.USER, site_password=fake_site.PASSWORD)
+            self.assertEqual(req2.session["uid"], uid)
+            with db.tx() as c:
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM accounts WHERE user_id = ?", (uid,)).fetchone()[0], 1)
+            # A wrong site password doesn't sign in.
+            req3 = Request({"type": "http", "session": {}})
+            await web.login_with_site(req3, site_username=fake_site.USER, site_password="wrong")
+            self.assertNotIn("uid", req3.session)
+            self.assertIn("اشتباه", req3.session["flash"])
+
     async def test_auto_reserve_opens_hidden_meal_tabs(self):
         # Only the lunch tab is open on the real page; dinner sits in a hidden tab.
         fake_site.MENU["1405/08/09"] = {"ناهار": {"foods": ["قیمه"], "reserved": "قیمه"}, "شام": {"foods": ["ماکارونی", "کتلت"]}}
@@ -166,6 +205,22 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_site.WEEK_SAVES, [("1405/08/10", "ناهار"), ("1405/08/09", "شام")], results)
         self.assertEqual(fake_site.MENU["1405/08/09"]["شام"]["reserved"], "ماکارونی")
         self.assertIn("★ 1405/08/09 (شام): ثبت شد («ماکارونی»)", results)
+
+    async def test_auto_reserve_follows_priorities_and_milk(self):
+        from app.worker import priorities
+
+        fake_site.MENU["1405/08/09"] = {
+            "صبحانه": {"foods": ["پنیر/خیار/نان/چای/قند", "کره/مربا/شیرطعم دار/نان", "شیر/حلواشکری/نان"]},
+            "شام": {"foods": ["ماکارونی,ترشی", "فلافل,گوجه"]},
+        }
+        acc = {"priority_breakfast": "پنیر", "priority_lunch": "", "priority_dinner": "کباب\nفلافل", "milk_pref": "flavored"}
+        c = self.client()
+        results = await c.auto_reserve_week("1405/08/09", ["صبحانه", "شام"], priorities(acc))
+        await c.close()
+        self.assertEqual(fake_site.MENU["1405/08/09"]["صبحانه"]["reserved"], "کره/مربا/شیرطعم دار/نان", results)
+        # The fake site books the shown option; its first option is what a real "select" would change.
+        self.assertIn("★ 1405/08/09 (شام): ثبت شد («فلافل,گوجه»)", results)
+        self.assertIn("★ 1405/08/09 (صبحانه): ثبت شد («کره/مربا/شیرطعم دار/نان»)", results)
 
     async def test_auto_reserve_reports_days_the_site_did_not_save(self):
         fake_site.MENU["1405/08/09"] = {"شام": {"foods": ["ماکارونی"]}}
@@ -186,6 +241,7 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
 
         with db.tx() as conn:
             conn.execute("INSERT OR IGNORE INTO users (id, username, password_hash, created_at) VALUES (1, 'u', 'x$y', 0)")
+            conn.execute("INSERT OR IGNORE INTO accounts (id, user_id, site_username, site_password_enc) VALUES (1, 1, '1', 'e')")
         fake_site.MENU["1405/08/05"] = {"ناهار": {"foods": ["قیمه"], "reserved": "قیمه"}}
         fake_site.MENU["1405/08/12"] = {"شام": {"foods": ["ماکارونی", "کتلت"]}}
         w = Worker()
@@ -204,6 +260,8 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(menu), 14)
         self.assertEqual(menu["1405/08/05"]["ناهار"], ["قیمه"])
         self.assertEqual(menu["1405/08/05"], {"صبحانه": [], "ناهار": ["قیمه"], "شام": []})  # empty meals kept
+        # The same read stores what this account has reserved.
+        self.assertEqual(db.reservations(1, "1405/08/02"), {"1405/08/05": {"ناهار": "قیمه"}})
 
         # A meal whose grid is missing from the page keeps the foods saved before.
         fake_site.HIDE_GRIDS.add("Lunch")
@@ -572,6 +630,60 @@ class UnitTest(unittest.TestCase):
             a, b = (c.execute("SELECT * FROM accounts WHERE id = ?", (i,)).fetchone() for i in (21, 22))
         self.assertEqual(web.account_status(a)["status"], "expired")
         self.assertEqual(web.account_status(b)["status"], "online")
+
+    def test_matches_excludes_minus_words_and_milk_priorities(self):
+        from app.worker import priorities
+
+        self.assertTrue(matches("شیر/حلواشکری/نان", "شیر -طعم"))
+        self.assertFalse(matches("کره/مربا/شیرطعم دار/نان", "شیر -طعم"))
+        self.assertTrue(matches("کره/مربا/شیرطعم دار/نان", "شیر طعم دار"))
+        self.assertFalse(matches("کباب", "-مرغ"))  # only exclusions match nothing
+        acc = {"priority_breakfast": "عسل", "priority_lunch": "جوجه\nقیمه", "priority_dinner": "", "milk_pref": "plain"}
+        self.assertEqual(priorities(acc), {"صبحانه": ["شیر -طعم", "عسل"], "ناهار": ["جوجه", "قیمه"], "شام": []})
+
+    def test_templates_compile(self):
+        from app import web
+
+        for name in ("dashboard.html", "login.html", "admin.html"):
+            web.templates.env.get_template(name)
+
+    def test_dashboard_shows_reservations_and_blocks_reserved_meals(self):
+        from starlette.requests import Request
+
+        from app import jalali, security, web
+
+        today = jalali.today_str()
+        with db.tx() as c:
+            uid = c.execute(
+                "INSERT INTO users (username, password_hash, created_at) VALUES ('dash', ?, 0)",
+                (security.hash_password("password1"),),
+            ).lastrowid
+            aid = c.execute(
+                "INSERT INTO accounts (user_id, site_username, site_password_enc, login_state, priority_lunch, milk_pref) "
+                "VALUES (?, '401', 'e', 'ok', 'جوجه', 'flavored')", (uid,),
+            ).lastrowid
+        db.save_week_menu({today: {"صبحانه": ["پنیر/نان"], "ناهار": ["چلو جوجه کباب,دوغ", "قیمه"], "شام": []}})
+        db.save_reservations(aid, {today: {"صبحانه": "", "ناهار": "چلو جوجه کباب,دوغ", "شام": ""}})
+
+        def req(query=b""):
+            return Request({"type": "http", "method": "GET", "path": "/", "query_string": query, "headers": [],
+                            "session": {"uid": uid}, "scheme": "http", "server": ("test", 80), "root_path": ""})
+
+        page = web.dashboard(req(f"account={aid}".encode()))
+        self.assertEqual(page.status_code, 200)
+        body = page.body.decode()
+        self.assertIn("رزروهای من", body)
+        self.assertIn('class="res-cell yes"', body)  # the reserved lunch in the week table
+        self.assertIn("رزرو داری: چلو جوجه کباب,دوغ", body)  # and in the buy form
+        self.assertIn('value="ناهار|قیمه" disabled', body)
+        self.assertIn('value="flavored" class="sr-only" checked', body)
+        self.assertNotIn("skip_if_reserved", body)
+        # A job for the reserved meal is refused.
+        res = web.create_job(req(), date=today, meal="", foods="", quantity=1, active_from="", active_to="",
+                             poll_seconds=0, picks=["ناهار|قیمه"], account_id=aid)
+        self.assertEqual(res.status_code, 303)
+        with db.tx() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM jobs WHERE account_id = ?", (aid,)).fetchone()[0], 0)
 
     def test_week_menu_is_shared_and_filters_picks(self):
         from app import web

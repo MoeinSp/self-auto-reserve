@@ -557,10 +557,12 @@ class CullinanClient:
         except PlaywrightTimeout:
             raise SiteError(f"زبانهٔ {meal} در صفحهٔ رزرو باز نشد") from None
 
-    async def auto_reserve_week(self, target_date: str, wanted_meals: list[str]) -> list[str]:
+    async def auto_reserve_week(self, target_date: str, wanted_meals: list[str],
+                                priorities: dict[str, list[str]] | None = None) -> list[str]:
         """Automatically reserve meals for the week containing `target_date`.
         Processes meals in order (e.g. صبحانه, ناهار, شام) and days in order (شنبه تا چهارشنبه).
-        Clicks the respective save button for each meal.
+        Clicks the respective save button for each meal. Each day gets the first food
+        matching the meal's priority list (highest first), else the first food offered.
         """
         page = await self._open(RESERVATION_PATH)
         for _ in range(4):
@@ -617,7 +619,10 @@ class CullinanClient:
                 if not foods:
                     continue
 
-                first_food = foods[0]
+                wanted = (priorities or {}).get(meal, [])
+                first_food = next(
+                    (o for w in wanted for o in foods if matches(o["text"], w)), foods[0]
+                )
                 if not first_food["selected"]:
                     await self._select(page, row["food"], first_food["value"])
                     rows = await self._rows(page, grid_sel) or []

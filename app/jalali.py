@@ -174,3 +174,22 @@ def get_next_week_days() -> list[dict]:
             "label": f"{w_name} {jd} {MONTHS[jm - 1]}",
         })
     return result
+
+
+def two_weeks_days() -> list[dict]:
+    """This week (from Saturday) and next week, for the reservations table."""
+    today = now_iran().date()
+    start = today - dt.timedelta(days=(today.weekday() + 2) % 7)
+    result = []
+    for i in range(14):
+        g = start + dt.timedelta(days=i)
+        jy, jm, jd = to_jalali(g)
+        result.append({
+            "date": f"{jy:04d}/{jm:02d}/{jd:02d}",
+            "day_name": weekday_name(g),
+            "short_label": f"{jd} {MONTHS[jm - 1]}",
+            "is_today": g == today,
+            "is_past": g < today,
+            "week": i // 7,
+        })
+    return result

@@ -89,6 +89,7 @@
 {# ------------------------------------------------------------------ tabs #}
 <nav class="tabs" aria-label="بخش‌ها">
   <a href="#buy" data-tab="buy">{{ icon('basket') }}<span>خرید</span></a>
+  <a href="#reserves" data-tab="reserves">{{ icon('calendar') }}<span>رزروها</span></a>
   <a href="#jobs" data-tab="jobs">{{ icon('list') }}<span>کارها</span><b class="tab-badge" data-live="jobs-badge">{% if active_jobs %}{{ active_jobs|length }}{% endif %}</b></a>
   <a href="#account" data-tab="account">{{ icon('user') }}<span>حساب</span></a>
   <a href="#tools" data-tab="tools">{{ icon('tools') }}<span>ابزارها</span></a>
@@ -140,10 +141,12 @@
         <div class="meals">
           {# Always all three meals, in order; a meal the site has no foods for gets an empty slot. #}
           {% for meal in MEALS if meal %}
-          <fieldset class="meal{% if not meals.get(meal) %} empty-meal{% endif %}">
+          {% set got = reserved.get(day, {}).get(meal) %}
+          <fieldset class="meal{% if not meals.get(meal) %} empty-meal{% endif %}{% if got %} reserved-meal{% endif %}"{% if got %} disabled{% endif %}>
             <legend>{{ meal }}</legend>
+            {% if got %}<div class="res yes">{{ icon('check') }} رزرو داری: {{ got }}<small>با رزرو، از سبد نمی‌شود خرید</small></div>{% endif %}
             {% for f in meals.get(meal, []) %}
-            <label class="pick"><input type="checkbox" name="picks" value="{{ meal }}|{{ f }}"><span>{{ f }}</span>{{ icon('check', 'pick-i') }}</label>
+            <label class="pick"><input type="checkbox" name="picks" value="{{ meal }}|{{ f }}"{% if got %} disabled{% endif %}><span>{{ f }}</span>{{ icon('check', 'pick-i') }}</label>
             {% else %}
             <p class="muted small">برای این وعده غذایی ثبت نشده</p>
             {% endfor %}
@@ -180,7 +183,6 @@
         </label>
       </div>
       <p class="hint warn-text" data-speed-warn hidden>{{ icon('alert') }} فاصلهٔ کمتر از ۵ ثانیه خطر مسدود شدن حساب را بالا می‌برد.</p>
-      <label class="check"><input type="checkbox" name="skip_if_reserved" value="1" checked><span>اگر برای آن وعده رزرو داشتم، از سبد نخر</span></label>
       <details class="mini">
         <summary>فقط در ساعت‌های مشخص</summary>
         <div class="grid-2">
@@ -194,6 +196,115 @@
       <button class="btn primary block lg">{{ icon('play') }} شروع پیگیری</button>
     </div>
   </form>
+  {% endif %}
+</section>
+
+{# ========================================================== RESERVATIONS #}
+<section class="panel" id="reserves" data-panel>
+  <div class="panel-head">
+    <h1>رزروهای من</h1>
+    <p class="muted">وعده‌هایی که در سامانهٔ سلف خریده‌ای، این هفته و هفتهٔ بعد. بعد از هر ورود خودکار به‌روز می‌شود.</p>
+  </div>
+  {% if not has_acc %}{{ need_account() }}{% else %}
+  <div class="card row-between res-head" data-live="res-head" data-key="{{ active_account.reservations_at }}">
+    <span class="muted small">{% if active_account.reservations_at %}آخرین بررسی {{ active_account.reservations_at|ts }}{% else %}هنوز بررسی نشده{% endif %}</span>
+    <form method="post" action="/account/reservations">
+      <input type="hidden" name="account_id" value="{{ active_account.id }}">
+      <button class="btn ghost sm" {% if running %}disabled{% endif %}>{{ icon('refresh') }} بررسی دستی</button>
+    </form>
+  </div>
+
+  <div data-live="res-table" data-key="{{ active_account.reservations_at }}">
+  {% for wk in [0, 1] %}
+  {% set wdays = res_days|selectattr('week', 'equalto', wk)|list %}
+  {% set wcount = namespace(n=0) %}
+  {% for d in wdays %}{% set wcount.n = wcount.n + (reserved_all.get(d.date, {})|length) %}{% endfor %}
+  <div class="card res-week">
+    <div class="row-between">
+      <h2>{{ 'این هفته' if wk == 0 else 'هفتهٔ بعد' }} <small class="muted">{{ wdays[0].short_label }} تا {{ wdays[-1].short_label }}</small></h2>
+      <span class="badge{% if wcount.n %} done{% endif %}">{{ wcount.n }} وعده</span>
+    </div>
+    <div class="res-grid" role="table" aria-label="رزروهای {{ 'این هفته' if wk == 0 else 'هفتهٔ بعد' }}">
+      <div class="res-row res-th" role="row">
+        <span role="columnheader">روز</span>
+        {% for m in MEALS if m %}<span role="columnheader">{{ m }}</span>{% endfor %}
+      </div>
+      {% for d in wdays %}
+      {% set day_res = reserved_all.get(d.date, {}) %}
+      {% set day_menu = all_menu.get(d.date, {}) %}
+      <div class="res-row{% if d.is_today %} today{% endif %}{% if d.is_past %} past{% endif %}" role="row">
+        <span class="res-day" role="rowheader"><b>{{ d.day_name }}</b><small>{{ d.short_label }}</small></span>
+        {% for m in MEALS if m %}
+        {% set got = day_res.get(m) %}
+        {% if got %}
+        <span class="res-cell yes" role="cell" title="{{ got }}">{{ icon('check') }}<span>{{ got.split(',')[0] }}</span></span>
+        {% elif day_menu.get(m) %}
+        <span class="res-cell" role="cell" title="رزرو نشده">—</span>
+        {% else %}
+        <span class="res-cell none" role="cell" title="برای این وعده غذایی تعریف نشده">·</span>
+        {% endif %}
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+  <p class="hint"><span class="res-key yes">{{ icon('check') }}</span> رزرو شده · <span class="res-key">—</span> رزرو نشده · <span class="res-key none">·</span> غذا ندارد</p>
+  </div>
+
+  <div class="card stack">
+    <div class="card-title">{{ icon('calendar') }}<h2>رزرو خودکار هفتگی</h2></div>
+    <p class="muted small">هر چهارشنبه که رزرو هفتهٔ بعد باز می‌شود، ربات وعده‌های انتخابی شنبه تا چهارشنبه را بر اساس اولویت‌های پایین رزرو می‌کند.</p>
+    <form method="post" action="/account/auto-reserve" class="stack">
+      <input type="hidden" name="account_id" value="{{ active_account.id }}">
+      <label class="switch">
+        <input type="checkbox" name="auto_reserve" value="1" {% if active_account.auto_reserve %}checked{% endif %} data-autosubmit>
+        <span class="switch-ui"></span><span>رزرو خودکار چهارشنبه‌ها</span>
+      </label>
+      {% set cur_meals = (active_account.auto_reserve_meals or 'ناهار,شام').split(',') %}
+      <div class="chips">
+        {% for m in ['صبحانه', 'ناهار', 'شام'] %}
+        <label class="chip toggle"><input type="checkbox" name="meals" value="{{ m }}" class="sr-only" {% if m in cur_meals %}checked{% endif %}><span>{{ m }}</span></label>
+        {% endfor %}
+      </div>
+      <div class="btn-row">
+        <button class="btn ghost">ذخیره وعده‌ها</button>
+        <button class="btn ghost" formaction="/account/auto-reserve/run-now" formnovalidate {% if running %}disabled{% endif %}>{{ icon('bolt') }} اجرای همین حالا</button>
+      </div>
+      <p class="muted small">{% if active_account.last_auto_reserve %}آخرین اجرا: هفتهٔ {{ active_account.last_auto_reserve }}{% else %}هنوز اجرا نشده{% endif %}</p>
+    </form>
+  </div>
+
+  <div class="card stack" id="priorities">
+    <div class="card-title">{{ icon('list') }}<h2>اولویت غذاها</h2></div>
+    <p class="muted small">در رزرو خودکار، هر روز اولین غذایی که با این فهرست جور باشد انتخاب می‌شود (بالاتر = مهم‌تر). اگر هیچ‌کدام نبود، اولین غذای آن روز. کافی است بخشی از نام را بنویسی، مثلاً «جوجه».</p>
+    <form method="post" action="/account/priorities" class="stack">
+      <input type="hidden" name="account_id" value="{{ active_account.id }}">
+      {% for meal, key in [('صبحانه', 'breakfast'), ('ناهار', 'lunch'), ('شام', 'dinner')] %}
+      <fieldset class="prio">
+        <legend>اولویت {{ meal }}</legend>
+        {% if key == 'breakfast' %}
+        <div class="field"><span>شیر</span>
+          <div class="segmented compact">
+            {% for v, t in [('', 'فرقی ندارد'), ('plain', 'شیر ساده'), ('flavored', 'شیر طعم‌دار')] %}
+            <label><input type="radio" name="milk_pref" value="{{ v }}" class="sr-only"{% if (active_account.milk_pref or '') == v %} checked{% endif %}><span>{{ t }}</span></label>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+        <label class="field"><span>هر خط یک غذا، به ترتیب اولویت</span>
+          <textarea name="priority_{{ key }}" id="prio-{{ key }}" rows="4" placeholder="{{ {'breakfast': 'پنیر&#10;عسل', 'lunch': 'جوجه کباب&#10;کوبیده&#10;قیمه', 'dinner': 'ماکارونی&#10;فلافل'}[key]|safe }}">{{ active_account['priority_' ~ key] }}</textarea>
+        </label>
+        {% if known_foods.get(meal) %}
+        <div class="chips food-suggest" aria-label="غذاهای این دو هفته">
+          {% for f in known_foods[meal] %}<button type="button" class="chip" data-add-food="{{ f }}" data-target="prio-{{ key }}">{{ icon('plus') }} {{ f }}</button>{% endfor %}
+        </div>
+        {% endif %}
+      </fieldset>
+      {% endfor %}
+      <button class="btn primary block">ذخیرهٔ اولویت‌ها</button>
+    </form>
+  </div>
   {% endif %}
 </section>
 
@@ -364,29 +475,6 @@
 <section class="panel" id="tools" data-panel>
   <div class="panel-head"><h1>ابزارها</h1></div>
   {% if not has_acc %}{{ need_account() }}{% else %}
-  <div class="card stack">
-    <div class="card-title">{{ icon('calendar') }}<h2>رزرو خودکار هفتگی</h2></div>
-    <p class="muted small">هر چهارشنبه که رزرو هفتهٔ بعد باز می‌شود، ربات وعده‌های انتخابی شنبه تا چهارشنبه را رزرو می‌کند.</p>
-    <form method="post" action="/account/auto-reserve" class="stack">
-      <input type="hidden" name="account_id" value="{{ active_account.id }}">
-      <label class="switch">
-        <input type="checkbox" name="auto_reserve" value="1" {% if active_account.auto_reserve %}checked{% endif %} data-autosubmit>
-        <span class="switch-ui"></span><span>رزرو خودکار چهارشنبه‌ها</span>
-      </label>
-      {% set cur_meals = (active_account.auto_reserve_meals or 'ناهار,شام').split(',') %}
-      <div class="chips">
-        {% for m in ['صبحانه', 'ناهار', 'شام'] %}
-        <label class="chip toggle"><input type="checkbox" name="meals" value="{{ m }}" class="sr-only" {% if m in cur_meals %}checked{% endif %}><span>{{ m }}</span></label>
-        {% endfor %}
-      </div>
-      <div class="btn-row">
-        <button class="btn ghost">ذخیره وعده‌ها</button>
-        <button class="btn ghost" formaction="/account/auto-reserve/run-now" formnovalidate {% if running %}disabled{% endif %}>{{ icon('bolt') }} اجرای همین حالا</button>
-      </div>
-      <p class="muted small">{% if active_account.last_auto_reserve %}آخرین اجرا: هفتهٔ {{ active_account.last_auto_reserve }}{% else %}هنوز اجرا نشده{% endif %}</p>
-    </form>
-  </div>
-
   <div class="card stack">
     <div class="card-title">{{ icon('ticket') }}<h2>فیش فراموشی کارت</h2></div>
     <p class="muted small">کارت دانشجویی همراهت نیست؟ کد فیش فراموشی تحویل غذا را بگیر.</p>

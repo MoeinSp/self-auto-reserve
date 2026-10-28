@@ -16,6 +16,8 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import captcha, config, db, jalali, limits, security
 from .text import norm, parse_foods
+from .cullinan import LoginFailed
+from .ratelimit import RateLimited
 from .worker import PAYMENT_SESSIONS, worker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -87,6 +89,69 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
     request.session.clear()
     request.session["uid"] = user["id"]
     return _back("/")
+
+
+SITE_USER_SUFFIX = "@self"  # panel users created by signing in with a site account: "<student number>@self"
+SITE_ONLY = "site-login"  # their password_hash: no panel password, they sign in with the site's
+
+
+@app.post("/login/site")
+async def login_with_site(
+    request: Request, site_username: str = Form(...), site_password: str = Form(...), invite: str = Form("")
+):
+    """Sign in with the university account only: the panel user and site account are made on first use."""
+    student = norm(site_username).strip()
+    if not student.isdigit() or not site_password:
+        return _back("/login", "شماره دانشجویی و رمز سامانهٔ سلف را وارد کن", request)
+    panel_name = student + SITE_USER_SUFFIX
+    with db.tx() as c:
+        user = c.execute("SELECT * FROM users WHERE username = ?", (panel_name,)).fetchone()
+        first_user = c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+    if user and user["password_hash"] == db.LOCKED:
+        return _back("/login", "این حساب در پنل قفل شده است", request)
+    if not user and config.INVITE_CODE and not first_user and invite.strip() != config.INVITE_CODE:
+        return _back("/login", "برای اولین ورود، کد دعوت لازم است", request)
+    try:
+        profile = await worker.verify_site_login(student, site_password)
+    except LoginFailed:
+        return _back("/login", "شماره دانشجویی یا رمز سامانهٔ سلف اشتباه است (یا کپچا خوانده نشد؛ دوباره امتحان کن)", request)
+    except RateLimited as exc:
+        return _back("/login", f"تلاش زیادی برای این شماره دانشجویی شده؛ حدود {int(exc.retry_after // 60) + 1} دقیقه دیگر امتحان کن", request)
+    except Exception:
+        logging.getLogger(__name__).exception("site sign-in failed for %s", student)
+        return _back("/login", "سایت دانشگاه جواب نداد؛ کمی بعد دوباره امتحان کن", request)
+    now = time.time()
+    with db.tx() as c:
+        if user:
+            uid = user["id"]
+        else:
+            uid = c.execute(
+                "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, ?, ?)",
+                (panel_name, SITE_ONLY, 1 if first_user else 0, now),
+            ).lastrowid
+        acc = c.execute("SELECT id FROM accounts WHERE user_id = ? AND site_username = ?", (uid, student)).fetchone()
+        enc = security.encrypt(site_password)
+        if acc:
+            account_id = acc["id"]
+            c.execute("UPDATE accounts SET site_password_enc = ? WHERE id = ?", (enc, account_id))
+        else:
+            account_id = c.execute(
+                "INSERT INTO accounts (user_id, site_username, site_password_enc, display_name, created_at) VALUES (?, ?, ?, ?, ?)",
+                (uid, student, enc, profile.get("name") or "", now),
+            ).lastrowid
+        if profile.get("name") or profile.get("credit"):
+            c.execute(
+                "UPDATE accounts SET display_name = COALESCE(NULLIF(?, ''), display_name), credit = ?, credit_updated_at = ? WHERE id = ?",
+                (profile.get("name") or "", profile.get("credit", ""), now, account_id),
+            )
+    db.set_login_state(account_id, True)
+    request.session.clear()
+    request.session["uid"] = uid
+    request.session["active_account_id"] = account_id
+    # The dashboard reads this week's reservations right away (first visit after a login).
+    with db.tx() as c:
+        c.execute("UPDATE accounts SET reservations_at = 0 WHERE id = ?", (account_id,))
+    return _back(f"/?account={account_id}#reserves", f"خوش آمدی{' ' + profile['name'] if profile.get('name') else ''}! رزروهای هفته در حال بررسی است.", request)
 
 
 @app.post("/register")
@@ -180,6 +245,13 @@ def dashboard(request: Request):
         logs = c.execute("SELECT * FROM logs WHERE user_id = ? ORDER BY id DESC LIMIT 40", (uid,)).fetchall()
         menu_at = c.execute("SELECT MAX(fetched_at) FROM week_menu").fetchone()[0]
     statuses = {acc["id"]: account_status(acc) for acc in accounts}
+    has_acc = bool(active_account) and active_id != "new"
+    res_days = jalali.two_weeks_days()
+    reserved_all = db.reservations(active_account["id"], res_days[0]["date"]) if has_acc else {}
+    # Read the account's reservations right after its first successful login, once.
+    if has_acc and not active_account["reservations_at"] and active_account["login_state"] == "ok" and not worker.busy(uid):
+        worker.check_reservations(uid, active_account["id"])
+    all_menu = db.week_menu(res_days[0]["date"])
     return _render(
         request, "dashboard.html", user=user, accounts=accounts,
         active_account=active_account, active_id=active_id,
@@ -189,11 +261,26 @@ def dashboard(request: Request):
         min_job_interval=config.MIN_JOB_INTERVAL, statuses=statuses,
         op=worker.ops.get(uid), now=time.time(),
         week_menu=db.week_menu(jalali.today_str()), menu_at=menu_at,
+        res_days=res_days, reserved_all=reserved_all, all_menu=all_menu,
+        reserved={d: m for d, m in reserved_all.items() if d >= jalali.today_str()},
+        known_foods=_known_foods(all_menu),
         menu_refreshing=worker.menu_refreshing,
         upcoming_days=jalali.get_upcoming_days(14),
         next_week_days=jalali.get_next_week_days(),
         jalali=jalali,
     )
+
+
+def _known_foods(menu: dict[str, dict[str, list[str]]]) -> dict[str, list[str]]:
+    """Distinct main dishes per meal ("چلو جوجه کباب,لیمو ترش" -> "چلو جوجه کباب"), for priority suggestions."""
+    out: dict[str, list[str]] = {}
+    for meals in menu.values():
+        for meal, foods in meals.items():
+            for food in foods:
+                name = food.split(",")[0].strip()
+                if name and name not in out.setdefault(meal, []):
+                    out[meal].append(name)
+    return out
 
 
 @app.post("/account")
@@ -297,6 +384,55 @@ async def test_account(
     if not worker.test_login(uid, account_id):
         return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
     return _back(f"/?account={account_id}#account")
+
+
+def _own_account(uid: int, account_id) -> int:
+    account_id = int(account_id) if str(account_id).isdigit() else 0
+    with db.tx() as c:
+        acc = c.execute("SELECT id FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
+    return acc["id"] if acc else 0
+
+
+@app.post("/account/reservations")
+async def check_reservations(request: Request, account_id: int = Form(...)):
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    account_id = _own_account(uid, account_id)
+    if not account_id:
+        return _back("/", "حساب پیدا نشد.", request)
+    if not worker.check_reservations(uid, account_id):
+        return _back(f"/?account={account_id}#reserves", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+    return _back(f"/?account={account_id}#reserves")
+
+
+def _clean_list(raw: str) -> str:
+    """One food per line, blank lines dropped, at most 30."""
+    return "\n".join(parse_foods(raw)[:30])
+
+
+@app.post("/account/priorities")
+def save_priorities(
+    request: Request,
+    account_id: int = Form(...),
+    priority_breakfast: str = Form(""),
+    priority_lunch: str = Form(""),
+    priority_dinner: str = Form(""),
+    milk_pref: str = Form(""),
+):
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    account_id = _own_account(uid, account_id)
+    if not account_id:
+        return _back("/", "حساب پیدا نشد.", request)
+    with db.tx() as c:
+        c.execute(
+            "UPDATE accounts SET priority_breakfast = ?, priority_lunch = ?, priority_dinner = ?, milk_pref = ? WHERE id = ?",
+            (_clean_list(priority_breakfast), _clean_list(priority_lunch), _clean_list(priority_dinner),
+             milk_pref if milk_pref in ("plain", "flavored") else "", account_id),
+        )
+    return _back(f"/?account={account_id}#reserves", "اولویت غذاها ذخیره شد؛ رزرو خودکار از این ترتیب استفاده می‌کند.", request)
 
 
 @app.post("/account/delete")
@@ -576,7 +712,6 @@ def create_job(
     active_from: str = Form(""),
     active_to: str = Form(""),
     poll_seconds: float = Form(0),
-    skip_if_reserved: str = Form(""),
     picks: list[str] = Form([]),
     account_id: int = Form(0),
 ):
@@ -601,6 +736,12 @@ def create_job(
         wanted = [(meal if meal in MEALS else "", foods.strip())]
     if not day:
         return _back(f"/?account={account_id}", "تاریخ را به شکل ۱۴۰۵/۰۸/۰۵ وارد کن", request)
+    # A meal already reserved can't be bought from the basket (the site refuses it).
+    have = db.reservations(account_id, day).get(day, {})
+    skipped = [m for m, _ in wanted if m in have]
+    wanted = [(m, f) for m, f in wanted if m not in have]
+    if skipped and not wanted:
+        return _back(f"/?account={account_id}", f"برای {'، '.join(skipped)} این روز رزرو داری؛ از سبد نمی‌شود خرید.", request)
     if not wanted:
         return _back(f"/?account={account_id}", "حداقل یک غذا تیک بزن یا بنویس (یا * برای هر غذایی)", request)
 
@@ -612,7 +753,7 @@ def create_job(
                 "INSERT INTO jobs (user_id, account_id, date, meal, foods, quantity, active_from, active_to, poll_seconds, "
                 "skip_if_reserved, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (uid, account_id, day, job_meal, job_foods, max(1, min(quantity, 5)), active_from, active_to,
-                 _poll_seconds(poll_seconds), 1 if skip_if_reserved else 0, now, now),
+                 _poll_seconds(poll_seconds), 1, now, now),
             )
     label = f"کار جدید برای «{acc_name}» اضافه شد" if len(wanted) == 1 else f"{len(wanted)} کار جدید برای «{acc_name}» اضافه شد"
     return _back(f"/?account={account_id}#jobs", f"{label}؛ ربات شروع به پیگیری سبد می‌کند.", request)

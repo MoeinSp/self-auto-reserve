@@ -149,6 +149,18 @@
       showDayMenu(pill.dataset.date);
       return;
     }
+    var add = t.closest('[data-add-food]');
+    if (add) {
+      // Append a suggested food to its priority list (once).
+      var box = document.getElementById(add.dataset.target);
+      if (box) {
+        var lines = box.value.split('\n').map(function (l) { return l.trim(); }).filter(Boolean);
+        if (lines.indexOf(add.dataset.addFood) < 0) lines.push(add.dataset.addFood);
+        box.value = lines.join('\n');
+        add.classList.add('used');
+      }
+      return;
+    }
     var amount = t.closest('[data-amount]');
     if (amount) {
       var inp = $('#chargeAmount');

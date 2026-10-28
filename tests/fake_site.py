@@ -170,7 +170,8 @@ async def reservation(request: Request):
                 if state.get("credit_days") is not None and state["credit_days"] <= 0:
                     break  # out of credit: the real site saves only the days it can pay for
                 if f.get(f"{suffix}chk{i}") and info and info.get("foods") and not info.get("reserved"):
-                    info["reserved"] = info["foods"][0]
+                    picked = f.get(f"{suffix}food{i}", "1")  # option values are 1..n
+                    info["reserved"] = info["foods"][int(picked) - 1 if picked.isdigit() and 0 < int(picked) <= len(info["foods"]) else 0]
                     WEEK_SAVES.append((day, meal))
                     if state.get("credit_days") is not None:
                         state["credit_days"] -= 1
@@ -191,7 +192,7 @@ async def reservation(request: Request):
             rows += f"""<tr>
               <td><input type="checkbox" id="{prefix}_chkReserve_{i}" name="{suffix}chk{i}"{checked}{'' if not info.get('locked') else DISABLED}></td>
               <td>{day}</td><td>
-              {_row_controls(prefix, i, foods, chosen, "1", not info.get('locked'), False)}
+              {_row_controls(prefix, i, foods, chosen, "1", not info.get('locked'), False).replace(' name="food', f' name="{suffix}food')}
               <td>{status}</td></tr>"""
         grids += (f'<input type="radio" name="tabstrip" id="css3-tabstrip-0-{n}"{" checked" if suffix == "Lunch" else ""}>'
                   f'<label for="css3-tabstrip-0-{n}">{meal}</label><div id="tabs-{n + 1}"><table id="{prefix}">{rows}</table>'

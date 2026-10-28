@@ -15,9 +15,12 @@ def norm(text: str) -> str:
 
 
 def matches(option_text: str, wanted: str) -> bool:
-    """True if every word of `wanted` appears in the option text."""
+    """True if every word of `wanted` appears in the option text; a word starting with "-" must not."""
     opt = norm(option_text)
-    return all(word in opt for word in norm(wanted).split())
+    words = norm(wanted).split()
+    return any(not w.startswith("-") for w in words) and all(
+        (w[1:] not in opt) if w.startswith("-") and len(w) > 1 else (w in opt) for w in words
+    )
 
 
 def parse_foods(raw: str) -> list[str]:
