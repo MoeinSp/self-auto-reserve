@@ -32,6 +32,7 @@ def _in_window(job_row) -> bool:
 
 OP_TIMEOUT = 600  # covers a manual captcha wait (CAPTCHA_MANUAL_TIMEOUT)
 RESERVATION_RECHECK = 600  # seconds between "is this meal already reserved?" checks per job
+WEEK_MENU_AUTO_KEY = "week_menu_auto"  # settings key: date of the last scheduled week-menu refresh
 
 
 def _explain(exc: Exception) -> str:
@@ -65,6 +66,8 @@ class Worker:
         # One on-demand operation (login test / menu fetch) per user, shown on the dashboard.
         self.ops: dict[int, dict] = {}  # user_id -> op dict
         self.reservation_checked: dict[int, float] = {}  # job id -> monotonic time of last check
+        self.menu_refreshing = False  # one shared week-menu refresh at a time
+        self.menu_auto_tried = 0.0  # time of the last scheduled refresh attempt
         self._pw = None
         self.browser = None
 
@@ -97,6 +100,8 @@ class Worker:
                     task = self.tasks.get(aid)
                     if task is None or task.done():
                         self.tasks[aid] = asyncio.create_task(self._run_account(aid))
+
+                self._auto_refresh_week_menu()
 
                 # Check weekly auto-reserve on Wednesdays
                 today_str = jalali.today_str()
@@ -316,32 +321,59 @@ class Worker:
 
         return self.start_op(user_id, "ایجاد لینک درگاه پرداخت", run, account_id=account_id)
 
-    def fetch_menu(self, user_id: int, account_id: int, date: str, meal: str = "") -> bool:
-        async def run(client: CullinanClient) -> str:
-            found = await client.read_menu(date, meal)
-            profile = await client.read_profile()
-            if profile.get("name"):
-                with db.tx() as c:
-                    c.execute("UPDATE accounts SET display_name = ? WHERE id = ?", (profile["name"], account_id))
-            with db.tx() as c:
-                row = c.execute(
-                    "SELECT data FROM menus WHERE user_id = ? AND account_id = ? AND date = ?",
-                    (user_id, account_id, date),
-                ).fetchone()
-                menu = {**json.loads(row["data"]), **found} if row and meal else found
-                c.execute(
-                    "INSERT INTO menus (user_id, account_id, date, data, fetched_at) VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(user_id, account_id, date) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at",
-                    (user_id, account_id, date, json.dumps(menu, ensure_ascii=False), time.time()),
-                )
-            what = f"{meal} {date}" if meal else date
-            if not any(info["foods"] for info in found.values()):
-                return f"برای {what} در برنامهٔ غذایی غذایی تعریف نشده."
-            reserved = [f"{m}: {info['reserved']}" for m, info in found.items() if info["reserved"]]
-            note = f" رزرو فعلی تو — {'، '.join(reserved)}." if reserved else " برای این وعده‌ها رزروی نداری."
-            return f"غذاهای {what} پیدا شد؛ تیک بزن و «شروع پیگیری» را بزن.{note}"
+    def refresh_week_menu(self, user_id: int, account_id: int, auto: bool = False) -> bool:
+        """Read this week's and next week's menu once and store it for everyone."""
+        if self.menu_refreshing:
+            return False
+        self.menu_refreshing = True
 
-        return self.start_op(user_id, "دریافت لیست غذا", run, account_id=account_id)
+        async def run(client: CullinanClient) -> str:
+            try:
+                week: dict[str, dict[str, list[str]]] = {}
+                next_week = jalali.get_next_week_days()
+                for target in [jalali.today_str()] + ([next_week[0]["date"]] if next_week else []):
+                    if target in week:
+                        continue
+                    try:
+                        found = await client.read_week(target)
+                    except SiteError:
+                        if not week:
+                            raise
+                        continue  # next week not published yet
+                    for day, meals in found.items():
+                        week[day] = {meal: info["foods"] for meal, info in meals.items()}
+                if not any(foods for meals in week.values() for foods in meals.values()):
+                    raise SiteError("در برنامهٔ غذایی این هفته غذایی پیدا نشد.")
+                db.save_week_menu(week)
+                if auto:
+                    db.set_setting(WEEK_MENU_AUTO_KEY, jalali.today_str())
+                days = sorted(week)
+                return f"غذاهای {len(days)} روز ({days[0]} تا {days[-1]}) برای همه ذخیره شد."
+            finally:
+                self.menu_refreshing = False
+
+        title = "بروزرسانی خودکار غذاهای هفته" if auto else "بروزرسانی غذاهای هفته"
+        if not self.start_op(user_id, title, run, account_id=account_id):
+            self.menu_refreshing = False
+            return False
+        return True
+
+    def _auto_refresh_week_menu(self) -> None:
+        """Every Tuesday from 18:00 (Iran time), refresh the shared menu once, retrying hourly on failure."""
+        now = jalali.now_iran()
+        today = jalali.today_str()
+        if jalali.weekday_name(today) != "سه‌شنبه" or now.hour < 18 or self.menu_refreshing:
+            return
+        if db.get_setting(WEEK_MENU_AUTO_KEY) == today or time.time() - self.menu_auto_tried < 3600:
+            return
+        with db.tx() as c:
+            accounts = c.execute(
+                "SELECT id, user_id FROM accounts WHERE login_state = 'ok' ORDER BY login_at DESC"
+            ).fetchall()
+        acc = next((a for a in accounts if not self.busy(a["user_id"])), None)
+        if acc:
+            self.menu_auto_tried = time.time()
+            self.refresh_week_menu(acc["user_id"], acc["id"], auto=True)
 
     async def _run_account(self, account_id: int) -> None:
         with db.tx() as c:

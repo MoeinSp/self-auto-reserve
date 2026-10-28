@@ -56,6 +56,24 @@
 {% endif %}
 </div>
 
+{# ------------------------------------------------------- shared week menu #}
+<div class="menu-bar" data-live="week-menu" data-key="{{ menu_at or '' }}{{ menu_refreshing }}">
+  <div class="menu-bar-text">
+    {{ icon('calendar') }}
+    <span><b>غذاهای هفته</b>
+      <small class="muted">{% if menu_refreshing %}در حال بروزرسانی…{% elif menu_at %}به‌روز شده {{ menu_at|ts }}{% else %}هنوز دریافت نشده{% endif %} · خودکار هر سه‌شنبه ۱۸:۰۰</small>
+    </span>
+  </div>
+  {% set menu_acc = active_account if has_acc else (accounts[0] if accounts else None) %}
+  <form method="post" action="/week-menu">
+    <input type="hidden" name="account_id" value="{{ menu_acc.id if menu_acc else 0 }}">
+    <button class="btn ghost sm" {% if running or menu_refreshing or not menu_acc %}disabled{% endif %}
+            title="{{ 'اول یک حساب سلف اضافه کن' if not menu_acc else 'غذاهای این هفته و هفتهٔ بعد را برای همه دریافت می‌کند' }}">
+      {{ icon('refresh') }} بروزرسانی غذاهای هفته
+    </button>
+  </form>
+</div>
+
 {# ---------------------------------------------------------- account switcher #}
 <div class="acc-bar" data-live="accounts">
   {% for acc in accounts %}
@@ -92,7 +110,6 @@
     <p class="muted">روز و وعده را انتخاب کن، غذاهای دلخواه را تیک بزن؛ ربات سبد را زیر نظر می‌گیرد و به محض آمدن، می‌خرد.</p>
   </div>
   {% if not has_acc %}{{ need_account() }}{% else %}
-  {% set menu_meal = (menu|list)[0] if menu and menu|length == 1 else '' %}
   <form method="post" action="/jobs" class="stack" id="buyForm">
     <input type="hidden" name="account_id" value="{{ active_account.id }}">
 
@@ -100,7 +117,7 @@
       <div class="step-title"><span class="step">۱</span>روز</div>
       <div class="date-strip" role="radiogroup" aria-label="روز">
         {% for d in upcoming_days %}
-        <button type="button" class="date-pill{% if (menu_date and d.date == menu_date) or (not menu_date and d.is_today) %} on{% endif %}"
+        <button type="button" class="date-pill{% if d.is_today %} on{% endif %}{% if not week_menu.get(d.date) %} no-menu{% endif %}"
                 data-date="{{ d.date }}" data-label="{{ d.short_label }}" role="radio">
           <span class="dp-day">{{ d.day_name }}</span>
           <span class="dp-num">{{ d.date[8:]|int }}</span>
@@ -110,47 +127,41 @@
         {% endfor %}
       </div>
       <details class="mini">
-        <summary>تاریخ دیگر <span class="muted" id="dateBadge" dir="ltr">{{ menu_date or today }}</span></summary>
-        <input id="dateInput" name="date" value="{{ menu_date or today }}" required placeholder="1405/08/05" dir="ltr" inputmode="numeric">
+        <summary>تاریخ دیگر <span class="muted" id="dateBadge" dir="ltr">{{ today }}</span></summary>
+        <input id="dateInput" name="date" value="{{ today }}" required placeholder="1405/08/05" dir="ltr" inputmode="numeric">
       </details>
-
-      <div class="step-title"><span class="step">۲</span>وعده</div>
-      <div class="segmented">
-        {% for m in MEALS %}
-        <label><input type="radio" name="meal" value="{{ m }}" class="sr-only"{% if m == menu_meal %} checked{% endif %}><span>{{ m or 'همه' }}</span></label>
-        {% endfor %}
-      </div>
-      <button class="btn ghost block" formaction="/menu" formnovalidate {% if running %}disabled{% endif %}>
-        {{ icon('search') }} {{ 'دریافت دوبارهٔ غذاها' if menu else 'دیدن غذاهای این روز' }}
-      </button>
     </div>
 
     <div class="card stack">
-      <div class="step-title"><span class="step">۳</span>غذاهای دلخواه</div>
-      {% if menu %}
-      <input type="hidden" name="menu_date" value="{{ menu_date }}">
-      <div class="muted small">غذاهای <b>{{ jalali.format_jalali_short(menu_date) }}</b> · به‌روز شده {{ menu_at|ts }}</div>
-      <div class="meals">
-        {% for meal, info in menu.items() %}{% set mi = loop.index0 %}
-        <fieldset class="meal">
-          <legend>{{ meal or 'غذاها' }}</legend>
-          {% if info.reserved %}<div class="res yes">{{ icon('check') }} رزرو داری: {{ info.reserved }}</div>
-          {% elif info.foods %}<div class="res">رزرو نداری{% if info.locked %} · مهلت رزرو گذشته{% endif %}</div>{% endif %}
-          {% for f in info.foods %}
-          <label class="pick"><input type="checkbox" name="picks" value="{{ mi }}:{{ loop.index0 }}"><span>{{ f }}</span>{{ icon('check', 'pick-i') }}</label>
-          {% else %}
-          <p class="muted small">غذایی تعریف نشده</p>
+      <div class="step-title"><span class="step">۲</span>غذاهای دلخواه</div>
+      {% for day, meals in week_menu.items() %}
+      <div class="day-menu" data-menu-date="{{ day }}"{% if day != today %} hidden{% endif %}>
+        <div class="muted small">غذاهای <b>{{ jalali.format_jalali_short(day) }}</b></div>
+        <div class="meals">
+          {% for meal, foods in meals.items() %}
+          <fieldset class="meal">
+            <legend>{{ meal or 'غذاها' }}</legend>
+            {% for f in foods %}
+            <label class="pick"><input type="checkbox" name="picks" value="{{ meal }}|{{ f }}"><span>{{ f }}</span>{{ icon('check', 'pick-i') }}</label>
+            {% else %}
+            <p class="muted small">غذایی تعریف نشده</p>
+            {% endfor %}
+          </fieldset>
           {% endfor %}
-        </fieldset>
-        {% endfor %}
+        </div>
       </div>
+      {% endfor %}
+      <p class="muted small" data-menu-empty{% if week_menu.get(today) %} hidden{% endif %}>
+        برای این روز غذایی ذخیره نشده؛ دکمهٔ «بروزرسانی غذاهای هفته» بالای صفحه را بزن یا نام غذا را دستی بنویس.
+      </p>
       <p class="hint">هر وعده یک کار جدا می‌شود. اگر در یک وعده چند غذا تیک بزنی، هر کدام زودتر در سبد بیاید خریده می‌شود.</p>
-      {% else %}
-      <p class="muted small">دکمهٔ «دیدن غذاهای این روز» را بزن تا لیست غذاها بیاید و فقط تیک بزنی؛ یا نام غذا را دستی بنویس.</p>
-      {% endif %}
-      {% set any_food = menu and (menu.values()|map(attribute='foods')|select|list) %}
-      <details class="mini"{% if not any_food %} open{% endif %}>
+      <details class="mini"{% if not week_menu.get(today) %} open{% endif %}>
         <summary>نوشتن دستی نام غذا</summary>
+        <div class="segmented">
+          {% for m in MEALS %}
+          <label><input type="radio" name="meal" value="{{ m }}" class="sr-only"{% if not m %} checked{% endif %}><span>{{ m or 'همه' }}</span></label>
+          {% endfor %}
+        </div>
         <label class="field"><span>هر خط یک غذا، به ترتیب اولویت · <code>*</code> یعنی هر غذایی</span>
           <textarea name="foods" rows="3" placeholder="جوجه کباب&#10;چلو کباب&#10;*"></textarea>
         </label>
@@ -158,7 +169,7 @@
     </div>
 
     <div class="card stack">
-      <div class="step-title"><span class="step">۴</span>تنظیمات</div>
+      <div class="step-title"><span class="step">۳</span>تنظیمات</div>
       <div class="grid-2">
         <label class="field">تعداد
           <input name="quantity" type="number" min="1" max="5" value="1" inputmode="numeric">

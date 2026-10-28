@@ -178,18 +178,7 @@ def dashboard(request: Request):
             "WHERE j.user_id = ? ORDER BY j.id DESC LIMIT 50", (uid,)
         ).fetchall()
         logs = c.execute("SELECT * FROM logs WHERE user_id = ? ORDER BY id DESC LIMIT 40", (uid,)).fetchall()
-        target_aid = active_account["id"] if active_account else 0
-        menu_row = c.execute(
-            "SELECT * FROM menus WHERE user_id = ? AND account_id = ? AND date >= ? ORDER BY fetched_at DESC LIMIT 1",
-            (uid, target_aid, jalali.today_str()),
-        ).fetchone()
-        if not menu_row and active_account:
-            # Fallback to any recent menu for this user
-            menu_row = c.execute(
-                "SELECT * FROM menus WHERE user_id = ? AND date >= ? ORDER BY fetched_at DESC LIMIT 1",
-                (uid, jalali.today_str()),
-            ).fetchone()
-    menu = json.loads(menu_row["data"]) if menu_row else None
+        menu_at = c.execute("SELECT MAX(fetched_at) FROM week_menu").fetchone()[0]
     statuses = {acc["id"]: account_status(acc) for acc in accounts}
     return _render(
         request, "dashboard.html", user=user, accounts=accounts,
@@ -199,8 +188,8 @@ def dashboard(request: Request):
         poll_seconds=config.POLL_SECONDS, max_per_hour=config.MAX_REQUESTS_PER_HOUR,
         min_job_interval=config.MIN_JOB_INTERVAL, statuses=statuses,
         op=worker.ops.get(uid), now=time.time(),
-        menu=menu, menu_date=menu_row["date"] if menu_row else None,
-        menu_at=menu_row["fetched_at"] if menu_row else None,
+        week_menu=db.week_menu(jalali.today_str()), menu_at=menu_at,
+        menu_refreshing=worker.menu_refreshing,
         upcoming_days=jalali.get_upcoming_days(14),
         next_week_days=jalali.get_next_week_days(),
         jalali=jalali,
@@ -542,20 +531,12 @@ def gateway_redirect(token: str):
 </html>""")
 
 
-@app.post("/menu")
-async def fetch_menu(
-    request: Request,
-    date: str = Form(...),
-    meal: str = Form(""),
-    account_id: int = Form(0),
-):
+@app.post("/week-menu")
+async def refresh_week_menu(request: Request, account_id: int = Form(0)):
+    """Read the whole week's foods once; the result is shared by every user."""
     uid = _uid(request)
     if not uid:
         return _back("/login")
-    day = jalali.normalize_date(date)
-    if not day:
-        return _back("/", "تاریخ را به شکل ۱۴۰۵/۰۸/۰۵ وارد کن", request)
-
     account_id = int(account_id) if str(account_id).isdigit() else 0
     with db.tx() as c:
         if account_id > 0:
@@ -567,36 +548,21 @@ async def fetch_menu(
     if not acc:
         return _back("/", "اول اطلاعات ورود سامانه را ذخیره کن", request)
 
-    if not worker.fetch_menu(uid, account_id, day, meal if meal in MEALS else ""):
+    if worker.menu_refreshing:
+        return _back(f"/?account={account_id}", "غذاهای هفته همین الان در حال بروزرسانی است؛ چند لحظه صبر کن.", request)
+    if not worker.refresh_week_menu(uid, account_id):
         return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
     return _back(f"/?account={account_id}#buy")
 
 
-def _picked_foods(uid: int, menu_date: str, picks: list[str], account_id: int = 0) -> dict[str, list[str]]:
-    """Map ticked "meal_index:food_index" boxes back to {meal: [food, ...]}."""
-    with db.tx() as c:
-        row = None
-        if account_id:
-            row = c.execute(
-                "SELECT data FROM menus WHERE user_id = ? AND account_id = ? AND date = ? ORDER BY fetched_at DESC LIMIT 1",
-                (uid, account_id, menu_date),
-            ).fetchone()
-        if not row:
-            row = c.execute(
-                "SELECT data FROM menus WHERE user_id = ? AND date = ? ORDER BY fetched_at DESC LIMIT 1",
-                (uid, menu_date),
-            ).fetchone()
-    if not row:
-        return {}
-    meals = list(json.loads(row["data"]).items())
+def _picked_foods(day: str, picks: list[str]) -> dict[str, list[str]]:
+    """Map ticked "meal|food" boxes to {meal: [food, ...]}, keeping only foods on the shared menu of `day`."""
+    menu = db.week_menu(day).get(day, {})
     chosen: dict[str, list[str]] = {}
     for pick in picks:
-        try:
-            m, f = (int(x) for x in pick.split(":"))
-            meal, info = meals[m]
-            chosen.setdefault(meal, []).append(info["foods"][f])
-        except (ValueError, IndexError):
-            continue
+        meal, _, food = pick.partition("|")
+        if food in menu.get(meal, []) and food not in chosen.get(meal, []):
+            chosen.setdefault(meal, []).append(food)
     return chosen
 
 
@@ -611,7 +577,6 @@ def create_job(
     active_to: str = Form(""),
     poll_seconds: float = Form(0),
     skip_if_reserved: str = Form(""),
-    menu_date: str = Form(""),
     picks: list[str] = Form([]),
     account_id: int = Form(0),
 ):
@@ -630,12 +595,10 @@ def create_job(
     if not acc:
         return _back("/", "اول اطلاعات ورود سامانه را ذخیره کن", request)
 
-    if picks and menu_date:
-        day = menu_date
-        wanted = [(m, "\n".join(f)) for m, f in _picked_foods(uid, menu_date, picks, account_id=account_id).items()]
-    else:
-        day = jalali.normalize_date(date)
-        wanted = [(meal if meal in MEALS else "", foods.strip())] if parse_foods(foods) else []
+    day = jalali.normalize_date(date)
+    wanted = [(m, "\n".join(f)) for m, f in _picked_foods(day, picks).items()] if day and picks else []
+    if not wanted and parse_foods(foods):
+        wanted = [(meal if meal in MEALS else "", foods.strip())]
     if not day:
         return _back(f"/?account={account_id}", "تاریخ را به شکل ۱۴۰۵/۰۸/۰۵ وارد کن", request)
     if not wanted:

@@ -1,4 +1,5 @@
 """SQLite storage. Small scale (a handful of friends), so plain sqlite3 is enough."""
+import json
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -66,6 +67,13 @@ CREATE TABLE IF NOT EXISTS menus (
     data TEXT NOT NULL,            -- JSON: {meal: {"foods": [...], "reserved": food or "", "locked": bool}}
     fetched_at REAL NOT NULL,
     PRIMARY KEY (user_id, account_id, date)
+);
+-- Week menu shared by everyone (all students get the same foods), refreshed
+-- from the reservation page by hand or every Tuesday evening.
+CREATE TABLE IF NOT EXISTS week_menu (
+    date TEXT PRIMARY KEY,
+    data TEXT NOT NULL,            -- JSON: {meal: [food, ...]}
+    fetched_at REAL NOT NULL
 );
 -- Admin-editable runtime settings (rate limits), see app/limits.py.
 CREATE TABLE IF NOT EXISTS settings (
@@ -286,3 +294,35 @@ def set_job_status(job_id: int, status: str, message: str = "") -> None:
 def set_job_message(job_id: int, message: str) -> None:
     with tx() as c:
         c.execute("UPDATE jobs SET message = ?, updated_at = ? WHERE id = ?", (message, time.time(), job_id))
+
+
+def get_setting(key: str, default: str = "") -> str:
+    with tx() as c:
+        row = c.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    with tx() as c:
+        c.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+def save_week_menu(week: dict[str, dict[str, list[str]]]) -> None:
+    """Store {date: {meal: [food, ...]}} for everyone, replacing those dates."""
+    now = time.time()
+    with tx() as c:
+        c.executemany(
+            "INSERT INTO week_menu (date, data, fetched_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(date) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at",
+            [(day, json.dumps(meals, ensure_ascii=False), now) for day, meals in week.items()],
+        )
+
+
+def week_menu(from_date: str) -> dict[str, dict[str, list[str]]]:
+    """Stored menus from `from_date` on, by date."""
+    with tx() as c:
+        rows = c.execute("SELECT date, data FROM week_menu WHERE date >= ? ORDER BY date", (from_date,)).fetchall()
+    return {r["date"]: json.loads(r["data"]) for r in rows}

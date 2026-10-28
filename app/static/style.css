@@ -309,6 +309,18 @@ details.fold > form, details.fold > div { padding: 0 16px 16px; }
 .features li { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 99px; font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); }
 .features .i { width: 14px; height: 14px; color: var(--accent); }
 
+/* ------------------------------------------------------ shared week menu */
+.menu-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 12px; padding: 10px 12px; border-radius: 14px; border: 1px solid var(--line);
+  background: var(--surface); box-shadow: var(--shadow-sm);
+}
+.menu-bar-text { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.menu-bar-text > .i { width: 20px; height: 20px; flex: none; color: var(--accent); }
+.menu-bar-text > span { display: flex; flex-direction: column; line-height: 1.4; }
+.menu-bar-text small { font-size: 11px; }
+.menu-bar form { margin: 0; }
+
 /* --------------------------------------------------------- account bar */
 .acc-bar {
   display: flex; gap: 8px; overflow-x: auto; margin: 0 -16px 12px; padding: 2px 16px 4px;
@@ -421,6 +433,7 @@ details.fold > form, details.fold > div { padding: 0 16px 16px; }
 .dp-tag { position: absolute; top: -7px; padding: 0 6px; border-radius: 99px; font-size: 9px; font-weight: 800; background: var(--info); color: var(--surface); }
 .date-pill.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 30%, transparent); }
 .date-pill.on .dp-day, .date-pill.on .dp-month { color: inherit; opacity: .8; }
+.date-pill.no-menu:not(.on) { opacity: .55; }
 
 /* ------------------------------------------------------------------ menu */
 .meals { display: grid; gap: 12px; }

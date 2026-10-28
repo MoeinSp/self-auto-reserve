@@ -154,6 +154,33 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
             await c.login()
         await c.close()
 
+    async def test_refresh_reads_this_and_next_week_for_everyone(self):
+        from unittest import mock
+
+        from app import jalali
+        from app.worker import Worker
+
+        with db.tx() as conn:
+            conn.execute("INSERT OR IGNORE INTO users (id, username, password_hash, created_at) VALUES (1, 'u', 'x$y', 0)")
+        fake_site.MENU["1405/08/05"] = {"ناهار": {"foods": ["قیمه"], "reserved": "قیمه"}}
+        fake_site.MENU["1405/08/12"] = {"شام": {"foods": ["ماکارونی", "کتلت"]}}
+        w = Worker()
+        w.browser = self.browser
+        c = self.client()
+        with mock.patch.object(w, "client_for", return_value=c), \
+                mock.patch.object(jalali, "today_str", return_value="1405/08/05"), \
+                mock.patch.object(jalali, "get_next_week_days", return_value=[{"date": "1405/08/09"}]):
+            self.assertTrue(w.refresh_week_menu(1, 1))
+            self.assertFalse(w.refresh_week_menu(1, 1))  # one at a time
+            while "finished" not in w.ops[1] or c.context:
+                await asyncio.sleep(0.05)
+        self.assertEqual(w.ops[1]["state"], "ok", w.ops[1]["message"])
+        self.assertFalse(w.menu_refreshing)
+        menu = db.week_menu("1405/08/02")
+        self.assertEqual(len(menu), 14)
+        self.assertEqual(menu["1405/08/05"]["ناهار"], ["قیمه"])
+        self.assertEqual(menu["1405/08/12"]["شام"], ["ماکارونی", "کتلت"])
+
 
 class UnitTest(unittest.TestCase):
     def test_jalali(self):
@@ -265,7 +292,7 @@ class UnitTest(unittest.TestCase):
         from app import web
 
         self.assertTrue(inspect.iscoroutinefunction(web.test_account))
-        self.assertTrue(inspect.iscoroutinefunction(web.fetch_menu))
+        self.assertTrue(inspect.iscoroutinefunction(web.refresh_week_menu))
         self.assertTrue(inspect.iscoroutinefunction(web.sync_credit))
         self.assertTrue(inspect.iscoroutinefunction(web.run_auto_reserve_now))
         self.assertTrue(inspect.iscoroutinefunction(web.get_forgot_receipt_endpoint))
@@ -507,6 +534,23 @@ class UnitTest(unittest.TestCase):
             a, b = (c.execute("SELECT * FROM accounts WHERE id = ?", (i,)).fetchone() for i in (21, 22))
         self.assertEqual(web.account_status(a)["status"], "expired")
         self.assertEqual(web.account_status(b)["status"], "online")
+
+    def test_week_menu_is_shared_and_filters_picks(self):
+        from app import web
+
+        with db.tx() as c:
+            c.execute("DELETE FROM week_menu")
+        db.save_week_menu({"1405/08/05": {"ناهار": ["قیمه", "کباب"], "شام": ["عدس پلو"]}})
+        db.save_week_menu({"1405/08/05": {"ناهار": ["قورمه سبزی"]}, "1405/08/06": {"شام": ["ماکارونی"]}})
+        self.assertEqual(db.week_menu("1405/08/05"), {
+            "1405/08/05": {"ناهار": ["قورمه سبزی"]}, "1405/08/06": {"شام": ["ماکارونی"]},
+        })
+        self.assertEqual(list(db.week_menu("1405/08/06")), ["1405/08/06"])
+        # Only foods on that day's menu are kept; duplicates and other days' foods are dropped.
+        picks = ["ناهار|قورمه سبزی", "ناهار|قورمه سبزی", "شام|ماکارونی", "ناهار|کباب", "bad"]
+        self.assertEqual(web._picked_foods("1405/08/05", picks), {"ناهار": ["قورمه سبزی"]})
+        self.assertEqual(web._picked_foods("1405/08/06", picks), {"شام": ["ماکارونی"]})
+
 
 if __name__ == "__main__":
     unittest.main()

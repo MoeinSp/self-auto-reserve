@@ -146,6 +146,7 @@
         p.classList.toggle('on', p === pill);
         p.setAttribute('aria-checked', p === pill ? 'true' : 'false');
       });
+      showDayMenu(pill.dataset.date);
       return;
     }
     var amount = t.closest('[data-amount]');
@@ -174,13 +175,26 @@
     var t = e.target;
     if (t.matches('[data-autosubmit]')) t.form.requestSubmit ? t.form.requestSubmit() : t.form.submit();
     if (t.closest('[data-job-filter]')) applyJobFilter();
-    if (t.id === 'dateInput') { var b = $('#dateBadge'); if (b) b.textContent = t.value; }
+    if (t.id === 'dateInput') { var b = $('#dateBadge'); if (b) b.textContent = t.value; showDayMenu(t.value.trim()); }
     if (t.matches('[data-cap-toggle]')) syncCap(t);
   });
 
   document.addEventListener('input', function (e) {
     if (e.target.matches('[data-speed]')) speedWarn(e.target);
   });
+
+  // Show the stored week menu of the chosen day; ticks on other days are cleared.
+  function showDayMenu(date) {
+    var found = false;
+    $$('[data-menu-date]').forEach(function (el) {
+      var on = el.dataset.menuDate === date;
+      found = found || on;
+      el.hidden = !on;
+      if (!on) $$('input[name=picks]', el).forEach(function (i) { i.checked = false; });
+    });
+    var empty = $('[data-menu-empty]');
+    if (empty) empty.hidden = found;
+  }
 
   function speedWarn(input) {
     var warn = $('[data-speed-warn]');
