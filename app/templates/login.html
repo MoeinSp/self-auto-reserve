@@ -8,6 +8,16 @@
   <p>ربات سبد غذایی سلف را برایت زیر نظر می‌گیرد و هر وقت غذای موردنظرت آمد، خودکار آن را می‌خرد.</p>
 </section>
 
+<form method="post" action="/login/guest" class="card stack guest-card">
+  <button class="btn ok block lg">{{ icon('play') }} ورود بدون ثبت‌نام</button>
+  {% if invite %}
+  <label class="field">کد دعوت
+    <input name="invite" required autocomplete="off" autocapitalize="none" dir="ltr">
+  </label>
+  {% endif %}
+  <p class="muted small">بدون هیچ اطلاعاتی وارد پنل شو؛ شماره دانشجویی و رمز سلف را داخل پنل وارد می‌کنی. ورودت روی همین مرورگر می‌ماند.</p>
+</form>
+
 <div class="auth-card card">
   <input type="radio" name="auth-tab" id="tab-site" class="sr-only" checked>
   <input type="radio" name="auth-tab" id="tab-login" class="sr-only">

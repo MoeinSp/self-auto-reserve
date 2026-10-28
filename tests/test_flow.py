@@ -19,7 +19,7 @@ from pathlib import Path
 from app import config, db  # noqa: E402
 config.DB_PATH = Path(tempfile.mkdtemp()) / "test.db"
 db.init()
-from app.cullinan import CullinanClient, Job, LoginFailed, launch_browser  # noqa: E402
+from app.cullinan import CullinanClient, Job, LoginFailed, SiteError, launch_browser  # noqa: E402
 from app.jalali import normalize_date, to_jalali  # noqa: E402
 from app.ratelimit import Throttle  # noqa: E402
 from app.text import matches  # noqa: E402
@@ -51,6 +51,7 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         fake_site.PURCHASES.clear()
         fake_site.MENU.clear()
         fake_site.WEEK_SAVES.clear()
+        fake_site.SALES.clear()
         fake_site.state.pop("credit_days", None)
         self.pw = await async_playwright().start()
         self.browser = await launch_browser(self.pw)
@@ -194,6 +195,21 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
             await web.login_with_site(req3, site_username=fake_site.USER, site_password="wrong")
             self.assertNotIn("uid", req3.session)
             self.assertIn("اشتباه", req3.session["flash"])
+
+    async def test_sells_reserved_meal_to_basket(self):
+        fake_site.MENU["1405/08/06"] = {
+            "ناهار": {"foods": ["قیمه"], "reserved": "قیمه"},
+            "شام": {"foods": ["کوکو"], "reserved": "کوکو", "locked": True},
+        }
+        c = self.client()
+        message = await c.sell_to_basket("1405/08/06", "ناهار")
+        self.assertIn("«قیمه» (ناهار 1405/08/06) به قیمت 250,000 ریال به سبد فروخته شد", message)
+        self.assertEqual(fake_site.SALES, [("1405/08/06", "ناهار")])
+        for meal in ("ناهار", "شام", "صبحانه"):  # sold already, locked, never reserved
+            with self.assertRaises(SiteError):
+                await c.sell_to_basket("1405/08/06", meal)
+        await c.close()
+        self.assertEqual(fake_site.SALES, [("1405/08/06", "ناهار")])
 
     async def test_auto_reserve_opens_hidden_meal_tabs(self):
         # Only the lunch tab is open on the real page; dinner sits in a hidden tab.
@@ -685,6 +701,50 @@ class UnitTest(unittest.TestCase):
         self.assertEqual(res.status_code, 303)
         with db.tx() as c:
             self.assertEqual(c.execute("SELECT COUNT(*) FROM jobs WHERE account_id = ?", (aid,)).fetchone()[0], 0)
+
+    def test_guest_sign_in_and_sell_form(self):
+        from starlette.requests import Request
+
+        from app import jalali, web
+
+        def req(session):
+            return Request({"type": "http", "method": "POST", "path": "/", "query_string": b"", "headers": [],
+                            "session": session, "scheme": "http", "server": ("test", 80), "root_path": ""})
+
+        web._guest_times.clear()
+        session = {}
+        res = web.login_as_guest(req(session), invite="")
+        self.assertEqual(res.headers["location"], "/#account")
+        uid = session["uid"]
+        with db.tx() as c:
+            user = c.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+        self.assertTrue(user["username"].startswith(web.GUEST_PREFIX))
+        self.assertEqual(user["is_admin"], 0)
+        page = asyncio.run(web.dashboard(Request({**req(session).scope, "method": "GET"})))
+        self.assertEqual(page.status_code, 200)
+        # The first site account names the guest "<student>@self", for «ورود با سلف» later.
+        config.SECRET_KEY = config.SECRET_KEY or "test-secret"
+        with db.tx() as c:
+            c.execute("DELETE FROM users WHERE username = '402@self'")
+        web.save_account(req(session), site_username="402", site_password="pw", display_name="", account_id=0)
+        with db.tx() as c:
+            user = c.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+            aid = c.execute("SELECT id FROM accounts WHERE user_id = ?", (uid,)).fetchone()["id"]
+        self.assertEqual((user["username"], user["password_hash"]), ("402@self", web.SITE_ONLY))
+        # Selling needs a meal the panel knows is reserved; nothing starts otherwise.
+        today = jalali.today_str()
+        db.save_reservations(aid, {today: {"صبحانه": "", "ناهار": "قیمه", "شام": ""}})
+        res = asyncio.run(web.sell_to_basket(req(session), date=today, sells=["شام"], account_id=aid))
+        self.assertEqual(session.get("flash"), "وعدهٔ رزروشده‌ای برای فروش تیک نزدی.")
+        self.assertFalse(web.worker.busy(uid))
+        db.save_week_menu({today: {"ناهار": ["قیمه"]}})
+        body = asyncio.run(web.dashboard(Request({**req(session).scope, "method": "GET"}))).body.decode()
+        self.assertIn('name="sells" value="ناهار"', body)
+        self.assertIn('formaction="/sell"', body)
+        # Too many guests in an hour are refused.
+        web._guest_times[:] = [time.time()] * web.GUESTS_PER_HOUR
+        web.login_as_guest(req({}), invite="")
+        web._guest_times.clear()
 
     def test_week_menu_is_shared_and_filters_picks(self):
         from app import web

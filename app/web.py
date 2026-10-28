@@ -4,6 +4,7 @@ import html
 import json
 import logging
 import re
+import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -152,6 +153,44 @@ async def login_with_site(
     with db.tx() as c:
         c.execute("UPDATE accounts SET reservations_at = 0 WHERE id = ?", (account_id,))
     return _back(f"/?account={account_id}#reserves", f"خوش آمدی{' ' + profile['name'] if profile.get('name') else ''}! رزروهای هفته در حال بررسی است.", request)
+
+
+GUEST_PREFIX = "guest-"  # panel users made by «ورود بدون ثبت‌نام»; no password, kept by the session cookie
+GUEST = "guest"  # their password_hash
+GUESTS_PER_HOUR = 30
+_guest_times: list[float] = []
+
+
+@app.post("/login/guest")
+def login_as_guest(request: Request, invite: str = Form("")):
+    """Enter the panel without any details; the site account is added inside, as usual."""
+    if _uid(request):
+        return _back("/")
+    if config.INVITE_CODE and invite.strip() != config.INVITE_CODE:
+        return _back("/login", "برای ورود، کد دعوت لازم است", request)
+    now = time.time()
+    _guest_times[:] = [t for t in _guest_times if now - t < 3600]
+    if len(_guest_times) >= GUESTS_PER_HOUR:
+        return _back("/login", "ورودهای بدون ثبت‌نام زیاد شده؛ کمی بعد دوباره امتحان کن", request)
+    _guest_times.append(now)
+    with db.tx() as c:
+        uid = c.execute(
+            "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, 0, ?)",
+            (GUEST_PREFIX + secrets.token_hex(4), GUEST, now),
+        ).lastrowid
+    request.session.clear()
+    request.session["uid"] = uid
+    return _back("/#account", "خوش آمدی! شماره دانشجویی و رمز سامانهٔ سلف را وارد کن.", request)
+
+
+def _claim_guest(c, uid: int, student: str) -> None:
+    """A guest's first site account names the user "<student>@self", so «ورود با سلف» finds it again later."""
+    user = c.execute("SELECT username, password_hash FROM users WHERE id = ?", (uid,)).fetchone()
+    if not user or user["password_hash"] != GUEST or not student.isdigit():
+        return
+    if c.execute("SELECT 1 FROM users WHERE username = ?", (student + SITE_USER_SUFFIX,)).fetchone():
+        return
+    c.execute("UPDATE users SET username = ?, password_hash = ? WHERE id = ?", (student + SITE_USER_SUFFIX, SITE_ONLY, uid))
 
 
 @app.post("/register")
@@ -340,6 +379,7 @@ def save_account(
                 )
                 saved_id = cur.lastrowid
                 flash = "حساب جدید اضافه شد. با زدن «تست ورود»، نام دانشجو خودکار دریافت و ثبت می‌شود."
+            _claim_guest(c, uid, username)
 
     request.session["active_account_id"] = saved_id
     task = worker.tasks.pop(saved_id, None)
@@ -757,6 +797,29 @@ def create_job(
             )
     label = f"کار جدید برای «{acc_name}» اضافه شد" if len(wanted) == 1 else f"{len(wanted)} کار جدید برای «{acc_name}» اضافه شد"
     return _back(f"/?account={account_id}#jobs", f"{label}؛ ربات شروع به پیگیری سبد می‌کند.", request)
+
+
+@app.post("/sell")
+async def sell_to_basket(  # async: it starts a background op
+    request: Request, date: str = Form(...), sells: list[str] = Form([]), account_id: int = Form(0)
+):
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    account_id = _own_account(uid, account_id)
+    if not account_id:
+        return _back("/", "حساب پیدا نشد.", request)
+    day = jalali.normalize_date(date)
+    if not day:
+        return _back(f"/?account={account_id}#buy", "تاریخ را به شکل ۱۴۰۵/۰۸/۰۵ وارد کن", request)
+    # Only meals the panel knows are reserved; the site is asked again before selling.
+    have = db.reservations(account_id, day).get(day, {})
+    meals = [m for m in MEALS if m and m in sells and m in have]
+    if not meals:
+        return _back(f"/?account={account_id}#buy", "وعدهٔ رزروشده‌ای برای فروش تیک نزدی.", request)
+    if not worker.sell_to_basket(uid, account_id, day, meals):
+        return _back(f"/?account={account_id}#buy", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+    return _back(f"/?account={account_id}#buy")
 
 
 def _poll_seconds(value: float) -> float:

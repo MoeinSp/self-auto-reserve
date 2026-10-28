@@ -281,6 +281,11 @@ details.fold > form, details.fold > div { padding: 0 16px 16px; }
 .btn.ghost { background: var(--surface); color: var(--text); border-color: var(--line-strong); }
 .btn.ghost:hover { border-color: var(--accent); }
 .btn.danger { color: var(--err); }
+.btn.sell { background: var(--err); color: #fff; }
+:root[data-theme="dark"] .btn.sell { color: #2a0b08; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .btn.sell { color: #2a0b08; } }
+.btn.sell:hover { filter: brightness(1.08); }
+.submit-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .btn.ghost.danger:hover { border-color: var(--err); background: var(--err-soft); }
 .btn.block { width: 100%; }
 .btn.lg { min-height: 52px; font-size: 16px; border-radius: 14px; }
@@ -298,6 +303,7 @@ details.fold > form, details.fold > div { padding: 0 16px 16px; }
 .hero h1 { font-size: 23px; }
 .hero p { margin: 8px auto 0; max-width: 380px; color: var(--muted); font-size: 14px; }
 .auth-card { padding: 16px; }
+.guest-card { padding: 16px; margin-bottom: 12px; text-align: center; }
 .auth-switch { margin-bottom: 16px; }
 .auth-switch label { display: grid; place-items: center; min-height: 40px; border-radius: 9px; font-weight: 700; color: var(--muted); }
 #tab-site:checked ~ .auth-switch label[for=tab-site],
@@ -572,6 +578,8 @@ details.fold > form, details.fold > div { padding: 0 16px 16px; }
 .res small { display: block; font-weight: 400; color: var(--muted); }
 .meal.reserved-meal { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
 .meal.reserved-meal .pick { opacity: .45; }
+.sell-pick { display: flex; align-items: center; gap: 8px; margin: 6px 0; padding: 8px 10px; border-radius: 10px; font-size: 13px; color: var(--err); background: var(--err-soft); cursor: pointer; }
+.sell-pick input { accent-color: var(--err); width: 18px; height: 18px; }
 .res-head { margin-bottom: 12px; padding: 10px 12px; }
 .res-head form { margin: 0; }
 .res-week { margin-bottom: 12px; }

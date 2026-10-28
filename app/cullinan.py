@@ -44,6 +44,20 @@ SEL = {
     "profile_credit": "#lblCredit, [id$='lblCredit']",
 }
 RESERVATION_PATH = "Reservation/Reservation.aspx"
+# Sell-to-basket page: date + reserve type + meal, «بارگذاری غذا» shows the reservation, «فروش به سبد غذا» sells it.
+SALE_PATH = "FoodBasket/FoodBasketSale.aspx"
+SALE_SEL = {
+    "date": "#cphMain_txtDate, [id$='txtDate']",
+    "type": "#cphMain_drpReserveType, [id$='drpReserveType']",
+    "meal": "#cphMain_drpFoodType, [id$='drpFoodType']",
+    "load": "#cphMain_btnFoodReload, [id$='btnFoodReload']",
+    "result": "#cphMain_fldsetResult, [id$='fldsetResult']",
+    "status": "#cphMain_lblStatus, [id$='lblStatus']",
+    "food": "#cphMain_lblFood, [id$='lblFood']",
+    "price": "#cphMain_lblBasketSalePrice, [id$='lblBasketSalePrice']",
+    "sell": "#cphMain_btnAccept, [id$='btnAccept']",
+}
+SALE_MEALS = {"صبحانه": "1", "ناهار": "2", "شام": "3"}
 WEEK_GRIDS = {"صبحانه": "Breakfast", "ناهار": "Lunch", "شام": "Dinner"}
 
 # Dropdown entries that mean "nothing selected".
@@ -496,6 +510,41 @@ class CullinanClient:
         if any(h in message.lower() for h in ERROR_HINTS):
             return Attempt("error", f"خرید «{name}» ناموفق: {message}", seen)
         return Attempt("bought", f"«{name}» ({rows[index]['label']}) خریداری شد. {message}".strip(), seen)
+
+    # ---------------------------------------------------------- basket sale
+    async def _load_sale(self, page: Page, date: str, meal: str) -> bool:
+        """Show the weekly reservation of `date` / `meal` on the sale page; True if it can be sold."""
+        await page.locator(SALE_SEL["date"]).first.evaluate("(el, v) => { el.value = v; }", date)
+        await page.select_option(SALE_SEL["type"], "0")  # رزرو هفتگی
+        await page.select_option(SALE_SEL["meal"], SALE_MEALS[meal])
+        await self.throttle.wait(step=True)
+        await self._postback(page, page.locator(SALE_SEL["load"]).first.click)
+        sell = page.locator(SALE_SEL["sell"]).first
+        return bool(await sell.count()) and await sell.is_visible() and await sell.is_enabled()
+
+    async def sell_to_basket(self, date: str, meal: str) -> str:
+        """Sell the weekly reservation of `date` / `meal` back to the food basket."""
+        if meal not in SALE_MEALS:
+            raise SiteError(f"وعدهٔ «{meal}» شناخته نشد")
+        self.dialogs.clear()
+        page = await self._open(SALE_PATH)
+        if await page.locator(SALE_SEL["load"]).count() == 0:
+            raise SiteError("صفحهٔ فروش به سبد غذایی باز نشد")
+        if not await self._load_sale(page, date, meal):
+            why = norm(" ".join(self.dialogs) + " " + await self._text(page, SALE_SEL["status"]) + " "
+                       + await self._text(page, SEL["page_message"]))
+            raise SiteError(f"{meal} {date} قابل فروش نیست{': ' + why if why else ''}")
+        food = norm(await self._text(page, SALE_SEL["food"])) or meal
+        price = norm(await self._text(page, SALE_SEL["price"]))
+        await self.throttle.wait(step=True)
+        await self._postback(page, page.locator(SALE_SEL["sell"]).first.click)
+        message = norm(" ".join(self.dialogs) + " " + await self._text(page, SEL["page_message"]))
+        # Check on the page itself: the reservation must no longer be offered for sale.
+        page = await self._open(SALE_PATH)
+        if await self._load_sale(page, date, meal):
+            raise SiteError(f"فروش «{food}» ثبت نشد{': ' + message if message else ''}")
+        price_note = f" به قیمت {price}" if price else ""
+        return f"«{food}» ({meal} {date}){price_note} به سبد فروخته شد. {message}".strip()
 
     # ---------------------------------------------------- weekly reservation
     async def read_week(self, date: str) -> dict[str, dict[str, dict]]:

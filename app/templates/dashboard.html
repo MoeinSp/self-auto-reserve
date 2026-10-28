@@ -142,9 +142,10 @@
           {# Always all three meals, in order; a meal the site has no foods for gets an empty slot. #}
           {% for meal in MEALS if meal %}
           {% set got = reserved.get(day, {}).get(meal) %}
-          <fieldset class="meal{% if not meals.get(meal) %} empty-meal{% endif %}{% if got %} reserved-meal{% endif %}"{% if got %} disabled{% endif %}>
+          <fieldset class="meal{% if not meals.get(meal) %} empty-meal{% endif %}{% if got %} reserved-meal{% endif %}">
             <legend>{{ meal }}</legend>
-            {% if got %}<div class="res yes">{{ icon('check') }} رزرو داری: {{ got }}<small>با رزرو، از سبد نمی‌شود خرید</small></div>{% endif %}
+            {% if got %}<div class="res yes">{{ icon('check') }} رزرو داری: {{ got }}<small>با رزرو، از سبد نمی‌شود خرید</small></div>
+            <label class="sell-pick"><input type="checkbox" name="sells" value="{{ meal }}"><span>این وعده را به سبد بفروش</span></label>{% endif %}
             {% for f in meals.get(meal, []) %}
             <label class="pick"><input type="checkbox" name="picks" value="{{ meal }}|{{ f }}"{% if got %} disabled{% endif %}><span>{{ f }}</span>{{ icon('check', 'pick-i') }}</label>
             {% else %}
@@ -159,6 +160,7 @@
         برای این روز غذایی ذخیره نشده؛ دکمهٔ «بروزرسانی غذاهای هفته» بالای صفحه را بزن یا نام غذا را دستی بنویس.
       </p>
       <p class="hint">هر وعده یک کار جدا می‌شود. اگر در یک وعده چند غذا تیک بزنی، هر کدام زودتر در سبد بیاید خریده می‌شود.</p>
+      <p class="hint">برای فروش: زیر وعدهٔ رزروشده «این وعده را به سبد بفروش» را تیک بزن و دکمهٔ قرمز «فروش به سبد» را بزن.</p>
       <details class="mini"{% if not week_menu.get(today) %} open{% endif %}>
         <summary>نوشتن دستی نام غذا</summary>
         <div class="segmented">
@@ -192,8 +194,10 @@
       </details>
     </div>
 
-    <div class="sticky-submit">
-      <button class="btn primary block lg">{{ icon('play') }} شروع پیگیری</button>
+    <div class="sticky-submit submit-pair">
+      <button class="btn ok block lg">{{ icon('play') }} خرید از سبد</button>
+      <button class="btn sell block lg" formaction="/sell" formnovalidate {% if running %}disabled{% endif %}
+              data-confirm="وعده‌های تیک‌خورده به سبد غذایی فروخته شوند؟ رزروشان لغو می‌شود.">{{ icon('basket') }} فروش به سبد</button>
     </div>
   </form>
   {% endif %}

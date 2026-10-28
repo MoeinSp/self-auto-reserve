@@ -202,7 +202,7 @@
       var on = el.dataset.menuDate === date;
       found = found || on;
       el.hidden = !on;
-      if (!on) $$('input[name=picks]', el).forEach(function (i) { i.checked = false; });
+      if (!on) $$('input[name=picks], input[name=sells]', el).forEach(function (i) { i.checked = false; });
     });
     var empty = $('[data-menu-empty]');
     if (empty) empty.hidden = found;

@@ -407,6 +407,25 @@ class Worker:
 
         return self.start_op(user_id, "بررسی رزروهای هفته", run, account_id=account_id)
 
+    def sell_to_basket(self, user_id: int, account_id: int, date: str, meals: list[str]) -> bool:
+        """Sell reserved meals of `date` back to the food basket, then re-read the reservations."""
+        async def run(client: CullinanClient) -> str:
+            done, failed = [], []
+            for meal in meals:
+                try:
+                    done.append(await client.sell_to_basket(date, meal))
+                except SiteError as exc:
+                    failed.append(f"✗ {exc}")
+            try:
+                await self._sync_weeks(client, account_id)
+            except Exception:
+                log.exception("reservations re-read after a sale failed (account %s)", account_id)
+            if failed and not done:
+                raise SiteError(" · ".join(failed))
+            return " · ".join(done + failed)
+
+        return self.start_op(user_id, "فروش به سبد غذایی", run, account_id=account_id)
+
     def refresh_week_menu(self, user_id: int, account_id: int, auto: bool = False) -> bool:
         """Read this week's and next week's menu once and store it for everyone."""
         if self.menu_refreshing:

@@ -205,3 +205,42 @@ async def reservation(request: Request):
       <input type="image" id="cphMain_imgbtnLastWeek" name="prev" src="/prev.png">
       <input type="image" id="cphMain_imgbtnNextWeek" name="next" src="/next.png">
       {grids}</form>{LONG_POLL}</body></html>""")
+
+
+SALES: list[tuple[str, str]] = []  # (date, meal) sold back to the basket
+
+
+@app.api_route("/FoodBasket/FoodBasketSale.aspx", methods=["GET", "POST"])
+async def basket_sale(request: Request):
+    """Like the real sale page: pick date and meal, «بارگذاری غذا» shows the weekly
+    reservation, «فروش به سبد غذا» sells it (confirm() first, as real pages do)."""
+    if request.cookies.get("auth") != "ok":
+        return RedirectResponse("/", 302)
+    f = dict(await request.form()) if request.method == "POST" else {}
+    date, meal_no = f.get("ctl00$cphMain$txtDate", "1405/08/06"), f.get("ctl00$cphMain$drpFoodType", "1")
+    meal = MEALS[int(meal_no) - 1] if meal_no in ("1", "2", "3") else ""
+    info = MENU.get(date, {}).get(meal, {}) if f.get("ctl00$cphMain$drpReserveType", "0") == "0" else {}
+    message, result = "", ""
+    if f.get("ctl00$cphMain$btnAccept") and info.get("reserved") and not info.get("locked"):
+        SALES.append((date, meal))
+        info["reserved"] = None
+        message = "غذا با موفقیت به سبد فروخته شد"
+    elif f.get("ctl00$cphMain$btnFoodReload"):
+        if info.get("reserved") and not info.get("locked"):
+            result = f"""<fieldset id="cphMain_fldsetResult">
+              <label id="cphMain_lblStatus">این غذا رزرو شده است</label>
+              <label id="cphMain_lblFood">{info['reserved']}</label>
+              <label id="cphMain_lblBasketSalePrice">250,000 ریال</label>
+              <input type="submit" name="ctl00$cphMain$btnAccept" id="cphMain_btnAccept" value="فروش به سبد غذا"
+                     onclick="return confirm('آیا مطمئن هستید؟');"></fieldset>"""
+        else:
+            message = "برای این وعده رزروی یافت نشد"
+    opts = "".join(f'<option value="{i}"{" selected" if str(i) == meal_no else ""}>{m}</option>' for i, m in enumerate(MEALS, 1))
+    return HTMLResponse(f"""<html><body><form method="post">
+      {PROFILE_SNIPPET}
+      <div id="cphMain_alertBox"><label id="cphMain_alertBoxValue">{message}</label></div>
+      <input name="ctl00$cphMain$txtDate" type="text" id="cphMain_txtDate" value="{date}">
+      <select name="ctl00$cphMain$drpReserveType" id="cphMain_drpReserveType"><option value="0">رزرو هفتگی</option><option value="1">روزفروش</option></select>
+      <select name="ctl00$cphMain$drpFoodType" id="cphMain_drpFoodType">{opts}</select>
+      <input name="ctl00$cphMain$btnFoodReload" type="submit" id="cphMain_btnFoodReload" value="بارگذاری غذا">
+      {result}</form>{LONG_POLL}</body></html>""")
