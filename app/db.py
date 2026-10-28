@@ -84,6 +84,21 @@ CREATE TABLE IF NOT EXISTS reservations (
     fetched_at REAL NOT NULL,
     PRIMARY KEY (account_id, date)
 );
+-- Reserved meals put in the food basket for sale. Selling isn't instant: the meal
+-- waits in the basket until someone buys it; the reservation page still shows it
+-- as reserved, so the panel keeps its own record and checks it on demand only.
+CREATE TABLE IF NOT EXISTS basket_sales (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    meal TEXT NOT NULL,
+    food TEXT NOT NULL DEFAULT '',
+    price TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,          -- listed (waiting in the basket) | sold
+    site_status TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    checked_at REAL NOT NULL,
+    PRIMARY KEY (account_id, date, meal)
+);
 -- Admin-editable runtime settings (rate limits), see app/limits.py.
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -356,15 +371,45 @@ def save_reservations(account_id: int, week: dict[str, dict[str, str]]) -> None:
 
 
 def reservations(account_id: int, from_date: str) -> dict[str, dict[str, str]]:
-    """Reserved foods of an account from `from_date` on: {date: {meal: food}} (only reserved meals)."""
+    """Reserved foods of an account from `from_date` on: {date: {meal: food}} (only reserved meals, not sold ones)."""
     with tx() as c:
         rows = c.execute(
             "SELECT date, data FROM reservations WHERE account_id = ? AND date >= ? ORDER BY date",
             (account_id, from_date),
         ).fetchall()
+    sold = {(d, m) for d, ms in sales(account_id, from_date).items() for m, v in ms.items() if v["status"] == "sold"}
     out = {}
     for r in rows:
-        meals = {m: f for m, f in json.loads(r["data"]).items() if f}
+        meals = {m: f for m, f in json.loads(r["data"]).items() if f and (r["date"], m) not in sold}
         if meals:
             out[r["date"]] = meals
+    return out
+
+
+def save_sale(account_id: int, date: str, meal: str, status: str, food: str = "", price: str = "", site_status: str = "") -> None:
+    now = time.time()
+    with tx() as c:
+        c.execute(
+            "INSERT INTO basket_sales (account_id, date, meal, food, price, status, site_status, created_at, checked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, date, meal) DO UPDATE SET "
+            "food = COALESCE(NULLIF(excluded.food, ''), food), price = COALESCE(NULLIF(excluded.price, ''), price), "
+            "status = excluded.status, site_status = excluded.site_status, checked_at = excluded.checked_at",
+            (account_id, date, meal, food, price, status, site_status, now, now),
+        )
+
+
+def drop_sale(account_id: int, date: str, meal: str) -> None:
+    with tx() as c:
+        c.execute("DELETE FROM basket_sales WHERE account_id = ? AND date = ? AND meal = ?", (account_id, date, meal))
+
+
+def sales(account_id: int, from_date: str) -> dict[str, dict[str, dict]]:
+    """Basket sales of an account from `from_date` on: {date: {meal: row}}."""
+    with tx() as c:
+        rows = c.execute(
+            "SELECT * FROM basket_sales WHERE account_id = ? AND date >= ? ORDER BY date", (account_id, from_date)
+        ).fetchall()
+    out: dict[str, dict[str, dict]] = {}
+    for r in rows:
+        out.setdefault(r["date"], {})[r["meal"]] = dict(r)
     return out

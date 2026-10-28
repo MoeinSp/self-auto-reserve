@@ -287,6 +287,7 @@ async def dashboard(request: Request):  # async: it may start a background op
     has_acc = bool(active_account) and active_id != "new"
     res_days = jalali.two_weeks_days()
     reserved_all = db.reservations(active_account["id"], res_days[0]["date"]) if has_acc else {}
+    sales = db.sales(active_account["id"], res_days[0]["date"]) if has_acc else {}
     # Read the account's reservations right after its first successful login, once.
     if has_acc and not active_account["reservations_at"] and active_account["login_state"] == "ok" and not worker.busy(uid):
         worker.check_reservations(uid, active_account["id"])
@@ -300,7 +301,7 @@ async def dashboard(request: Request):  # async: it may start a background op
         min_job_interval=config.MIN_JOB_INTERVAL, statuses=statuses,
         op=worker.ops.get(uid), now=time.time(),
         week_menu=db.week_menu(jalali.today_str()), menu_at=menu_at,
-        res_days=res_days, reserved_all=reserved_all, all_menu=all_menu,
+        res_days=res_days, reserved_all=reserved_all, all_menu=all_menu, sales=sales,
         reserved={d: m for d, m in reserved_all.items() if d >= jalali.today_str()},
         known_foods=_known_foods(all_menu),
         menu_refreshing=worker.menu_refreshing,
@@ -812,12 +813,43 @@ async def sell_to_basket(  # async: it starts a background op
     day = jalali.normalize_date(date)
     if not day:
         return _back(f"/?account={account_id}#buy", "تاریخ را به شکل ۱۴۰۵/۰۸/۰۵ وارد کن", request)
-    # Only meals the panel knows are reserved; the site is asked again before selling.
+    # Only meals the panel knows are reserved and not in the basket yet; the site is asked again before selling.
     have = db.reservations(account_id, day).get(day, {})
-    meals = [m for m in MEALS if m and m in sells and m in have]
+    listed = db.sales(account_id, day).get(day, {})
+    meals = [m for m in MEALS if m and m in sells and m in have and m not in listed]
     if not meals:
         return _back(f"/?account={account_id}#buy", "وعدهٔ رزروشده‌ای برای فروش تیک نزدی.", request)
     if not worker.sell_to_basket(uid, account_id, day, meals):
+        return _back(f"/?account={account_id}#buy", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+    return _back(f"/?account={account_id}#buy")
+
+
+SALE_CHECK_GAP = 60  # seconds between two checks of one sale; checks are manual only
+
+
+@app.post("/sales/{action}")
+async def sale_action(  # async: it starts a background op
+    request: Request, action: str, sale: str = Form(...), account_id: int = Form(0)
+):
+    """«بررسی» or «حذف از سبد» for one meal waiting in the basket (sale = "date|meal")."""
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    account_id = _own_account(uid, account_id)
+    day, _, meal = sale.partition("|")
+    row = db.sales(account_id, day).get(day, {}).get(meal) if account_id and day else None
+    if not row or action not in ("check", "cancel"):
+        return _back(f"/?account={account_id}#buy", "این وعده در سبد پیدا نشد.", request)
+    if action == "check":
+        wait = int(row["checked_at"] + SALE_CHECK_GAP - time.time())
+        if wait > 0:
+            return _back(f"/?account={account_id}#buy", f"همین الان بررسی شد؛ {wait} ثانیهٔ دیگر دوباره بزن.", request)
+        started = worker.check_sale(uid, account_id, day, meal)
+    else:
+        if row["status"] != "listed":
+            return _back(f"/?account={account_id}#buy", "این وعده دیگر در سبد نیست.", request)
+        started = worker.cancel_sale(uid, account_id, day, meal)
+    if not started:
         return _back(f"/?account={account_id}#buy", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
     return _back(f"/?account={account_id}#buy")
 

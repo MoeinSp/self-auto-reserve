@@ -196,20 +196,30 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("uid", req3.session)
             self.assertIn("اشتباه", req3.session["flash"])
 
-    async def test_sells_reserved_meal_to_basket(self):
+    async def test_sale_waits_in_basket_until_bought(self):
         fake_site.MENU["1405/08/06"] = {
             "ناهار": {"foods": ["قیمه"], "reserved": "قیمه"},
             "شام": {"foods": ["کوکو"], "reserved": "کوکو", "locked": True},
         }
         c = self.client()
-        message = await c.sell_to_basket("1405/08/06", "ناهار")
-        self.assertIn("«قیمه» (ناهار 1405/08/06) به قیمت 250,000 ریال به سبد فروخته شد", message)
+        info = await c.sell_to_basket("1405/08/06", "ناهار")
+        self.assertEqual((info["state"], info["food"], info["price"]), ("listed", "قیمه", "250,000 ریال"))
+        self.assertIn("در سبد غذایی برای فروش قرار دارد", info["status"])
         self.assertEqual(fake_site.SALES, [("1405/08/06", "ناهار")])
-        for meal in ("ناهار", "شام", "صبحانه"):  # sold already, locked, never reserved
+        # Selling again doesn't click anything; checking only reads.
+        self.assertEqual((await c.sell_to_basket("1405/08/06", "ناهار"))["state"], "listed")
+        self.assertEqual((await c.sale_status("1405/08/06", "ناهار"))["state"], "listed")
+        self.assertEqual(fake_site.SALES, [("1405/08/06", "ناهار")])
+        # Taken back out, then put in again and bought by someone.
+        self.assertEqual((await c.cancel_sale("1405/08/06", "ناهار"))["state"], "reserved")
+        await c.sell_to_basket("1405/08/06", "ناهار")
+        fake_site.MENU["1405/08/06"]["ناهار"].update(reserved=None, listed=False)
+        self.assertEqual((await c.sale_status("1405/08/06", "ناهار"))["state"], "gone")
+        for meal in ("شام", "صبحانه"):  # locked, never reserved
             with self.assertRaises(SiteError):
                 await c.sell_to_basket("1405/08/06", meal)
         await c.close()
-        self.assertEqual(fake_site.SALES, [("1405/08/06", "ناهار")])
+        self.assertEqual(len(fake_site.SALES), 2)
 
     async def test_auto_reserve_opens_hidden_meal_tabs(self):
         # Only the lunch tab is open on the real page; dinner sits in a hidden tab.
@@ -741,6 +751,27 @@ class UnitTest(unittest.TestCase):
         body = asyncio.run(web.dashboard(Request({**req(session).scope, "method": "GET"}))).body.decode()
         self.assertIn('name="sells" value="ناهار"', body)
         self.assertIn('formaction="/sell"', body)
+        # A meal waiting in the basket shows its state with «بررسی» and «حذف از سبد», not the sell box.
+        from app.worker import Worker
+        Worker._record_sale(aid, today, "ناهار", {"state": "listed", "status": "", "food": "قیمه", "price": "250,000 ریال"})
+        body = asyncio.run(web.dashboard(Request({**req(session).scope, "method": "GET"}))).body.decode()
+        self.assertIn("داخل سبد قرار دارد · در انتظار فروش", body)
+        self.assertIn(f'formaction="/sales/check" formnovalidate name="sale" value="{today}|ناهار"', body)
+        self.assertNotIn('name="sells" value="ناهار"', body)
+        self.assertIn('class="res-cell basket"', body)
+        res = asyncio.run(web.sell_to_basket(req(session), date=today, sells=["ناهار"], account_id=aid))
+        self.assertFalse(web.worker.busy(uid))  # already in the basket: nothing to do
+        res = asyncio.run(web.sale_action(req(session), "check", sale=f"{today}|ناهار", account_id=aid))
+        self.assertIn("ثانیهٔ دیگر", session.get("flash"))  # just checked: no request to the site
+        self.assertFalse(web.worker.busy(uid))
+        # Once sold it no longer counts as reserved, so the meal can be bought again.
+        Worker._record_sale(aid, today, "ناهار", {"state": "gone", "status": "", "food": "", "price": ""})
+        self.assertEqual(db.reservations(aid, today), {})
+        body = asyncio.run(web.dashboard(Request({**req(session).scope, "method": "GET"}))).body.decode()
+        self.assertIn("به سبد فروخته شد: قیمه", body)
+        self.assertIn('value="ناهار|قیمه">', body)
+        Worker._record_sale(aid, today, "ناهار", {"state": "reserved", "status": "", "food": "", "price": ""})
+        self.assertEqual(db.sales(aid, today), {})
         # Too many guests in an hour are refused.
         web._guest_times[:] = [time.time()] * web.GUESTS_PER_HOUR
         web.login_as_guest(req({}), invite="")

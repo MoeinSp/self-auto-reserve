@@ -618,3 +618,15 @@ details.fold > form, details.fold > div { padding: 0 16px 16px; }
 .food-suggest .chip { font-size: 12px; min-height: 30px; padding: 2px 10px; cursor: pointer; }
 .food-suggest .chip .i { width: 12px; height: 12px; }
 .food-suggest .chip.used { opacity: .4; }
+
+/* Reserved meal waiting in the food basket for a buyer */
+.meal.in-basket { border-color: color-mix(in srgb, var(--warn) 50%, var(--line)); }
+.sale-box { display: grid; gap: 6px; margin: 4px 0 8px; padding: 10px; border-radius: 10px; background: var(--warn-soft); }
+.res.basket { color: var(--warn); font-weight: 700; display: flex; align-items: center; gap: 6px; }
+.res.basket .i, .res.sold .i { width: 16px; height: 16px; flex: none; }
+.res.sold { color: var(--muted); font-weight: 600; display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.res-cell.basket { background: var(--warn-soft); color: var(--warn); font-weight: 600; }
+.res-cell.sold { color: var(--muted); text-decoration: line-through; }
+.res-cell.basket .i, .res-cell.sold .i { width: 14px; height: 14px; flex: none; }
+.res-key.basket { background: var(--warn-soft); color: var(--warn); }
+.res-key.basket .i { width: 12px; height: 12px; }

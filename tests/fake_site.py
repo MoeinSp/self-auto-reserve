@@ -207,13 +207,15 @@ async def reservation(request: Request):
       {grids}</form>{LONG_POLL}</body></html>""")
 
 
-SALES: list[tuple[str, str]] = []  # (date, meal) sold back to the basket
+SALES: list[tuple[str, str]] = []  # (date, meal) put in the basket for sale
 
 
 @app.api_route("/FoodBasket/FoodBasketSale.aspx", methods=["GET", "POST"])
 async def basket_sale(request: Request):
     """Like the real sale page: pick date and meal, «بارگذاری غذا» shows the weekly
-    reservation, «فروش به سبد غذا» sells it (confirm() first, as real pages do)."""
+    reservation. «فروش به سبد غذا» puts it in the basket (MENU info "listed"), where
+    it waits for a buyer; «حذف از سبد غذا» takes it back. Tests "sell" it by
+    clearing "reserved"."""
     if request.cookies.get("auth") != "ok":
         return RedirectResponse("/", 302)
     f = dict(await request.form()) if request.method == "POST" else {}
@@ -221,18 +223,24 @@ async def basket_sale(request: Request):
     meal = MEALS[int(meal_no) - 1] if meal_no in ("1", "2", "3") else ""
     info = MENU.get(date, {}).get(meal, {}) if f.get("ctl00$cphMain$drpReserveType", "0") == "0" else {}
     message, result = "", ""
-    if f.get("ctl00$cphMain$btnAccept") and info.get("reserved") and not info.get("locked"):
+    if f.get("ctl00$cphMain$btnAccept") and info.get("reserved") and not info.get("locked") and not info.get("listed"):
         SALES.append((date, meal))
-        info["reserved"] = None
-        message = "غذا با موفقیت به سبد فروخته شد"
+        info["listed"] = True
+        message = "این غذا به سبد غذایی جهت فروش اضافه شد"
+    elif f.get("ctl00$cphMain$btnCancel") and info.get("listed"):
+        info["listed"] = False
+        message = "غذا از سبد غذایی حذف شد"
     elif f.get("ctl00$cphMain$btnFoodReload"):
         if info.get("reserved") and not info.get("locked"):
+            listed = info.get("listed")
+            button = ('<input type="submit" name="ctl00$cphMain$btnCancel" id="cphMain_btnCancel" value="حذف از سبد غذا">' if listed else
+                      '<input type="submit" name="ctl00$cphMain$btnAccept" id="cphMain_btnAccept" value="فروش به سبد غذا" '
+                      'onclick="return confirm(&quot;آیا مطمئن هستید؟&quot;);">')
             result = f"""<fieldset id="cphMain_fldsetResult">
-              <label id="cphMain_lblStatus">این غذا رزرو شده است</label>
+              <label id="cphMain_lblStatus">{'این غذا در سبد غذایی برای فروش قرار دارد' if listed else 'این غذا رزرو شده است'}</label>
               <label id="cphMain_lblFood">{info['reserved']}</label>
               <label id="cphMain_lblBasketSalePrice">250,000 ریال</label>
-              <input type="submit" name="ctl00$cphMain$btnAccept" id="cphMain_btnAccept" value="فروش به سبد غذا"
-                     onclick="return confirm('آیا مطمئن هستید؟');"></fieldset>"""
+              {button}</fieldset>"""
         else:
             message = "برای این وعده رزروی یافت نشد"
     opts = "".join(f'<option value="{i}"{" selected" if str(i) == meal_no else ""}>{m}</option>' for i, m in enumerate(MEALS, 1))

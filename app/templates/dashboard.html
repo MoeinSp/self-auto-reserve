@@ -142,10 +142,22 @@
           {# Always all three meals, in order; a meal the site has no foods for gets an empty slot. #}
           {% for meal in MEALS if meal %}
           {% set got = reserved.get(day, {}).get(meal) %}
-          <fieldset class="meal{% if not meals.get(meal) %} empty-meal{% endif %}{% if got %} reserved-meal{% endif %}">
+          {% set sale = sales.get(day, {}).get(meal) %}
+          <fieldset class="meal{% if not meals.get(meal) %} empty-meal{% endif %}{% if got %} reserved-meal{% endif %}{% if sale and sale.status == 'listed' %} in-basket{% endif %}">
             <legend>{{ meal }}</legend>
-            {% if got %}<div class="res yes">{{ icon('check') }} رزرو داری: {{ got }}<small>با رزرو، از سبد نمی‌شود خرید</small></div>
-            <label class="sell-pick"><input type="checkbox" name="sells" value="{{ meal }}"><span>این وعده را به سبد بفروش</span></label>{% endif %}
+            {% if sale and sale.status == 'listed' %}
+            <div class="sale-box">
+              <div class="res basket">{{ icon('basket') }} داخل سبد قرار دارد · در انتظار فروش</div>
+              <small class="muted">{{ sale.food or got }}{% if sale.price %} · {{ sale.price }}{% endif %} · آخرین بررسی {{ sale.checked_at|ts }}</small>
+              <div class="btn-row">
+                <button class="btn ghost sm" formaction="/sales/check" formnovalidate name="sale" value="{{ day }}|{{ meal }}" {% if running %}disabled{% endif %}>{{ icon('refresh') }} بررسی</button>
+                <button class="btn ghost sm danger" formaction="/sales/cancel" formnovalidate name="sale" value="{{ day }}|{{ meal }}" {% if running %}disabled{% endif %}
+                        data-confirm="این وعده از سبد برداشته شود؟ رزروش سر جایش می‌ماند.">{{ icon('x') }} حذف از سبد</button>
+              </div>
+            </div>
+            {% elif got %}<div class="res yes">{{ icon('check') }} رزرو داری: {{ got }}<small>با رزرو، از سبد نمی‌شود خرید</small></div>
+            <label class="sell-pick"><input type="checkbox" name="sells" value="{{ meal }}"><span>این وعده را به سبد بفروش</span></label>
+            {% elif sale and sale.status == 'sold' %}<div class="res sold">{{ icon('check') }} به سبد فروخته شد: {{ sale.food }}</div>{% endif %}
             {% for f in meals.get(meal, []) %}
             <label class="pick"><input type="checkbox" name="picks" value="{{ meal }}|{{ f }}"{% if got %} disabled{% endif %}><span>{{ f }}</span>{{ icon('check', 'pick-i') }}</label>
             {% else %}
@@ -240,7 +252,12 @@
         <span class="res-day" role="rowheader"><b>{{ d.day_name }}</b><small>{{ d.short_label }}</small></span>
         {% for m in MEALS if m %}
         {% set got = day_res.get(m) %}
-        {% if got %}
+        {% set sale = sales.get(d.date, {}).get(m) %}
+        {% if sale and sale.status == 'listed' %}
+        <span class="res-cell basket" role="cell" title="داخل سبد، در انتظار فروش: {{ sale.food or got }}">{{ icon('basket') }}<span>در سبد</span></span>
+        {% elif sale and sale.status == 'sold' %}
+        <span class="res-cell sold" role="cell" title="فروخته شد: {{ sale.food }}">{{ icon('check') }}<span>فروخته شد</span></span>
+        {% elif got %}
         <span class="res-cell yes" role="cell" title="{{ got }}">{{ icon('check') }}<span>{{ got.split(',')[0] }}</span></span>
         {% elif day_menu.get(m) %}
         <span class="res-cell" role="cell" title="رزرو نشده">—</span>
@@ -253,7 +270,7 @@
     </div>
   </div>
   {% endfor %}
-  <p class="hint"><span class="res-key yes">{{ icon('check') }}</span> رزرو شده · <span class="res-key">—</span> رزرو نشده · <span class="res-key none">·</span> غذا ندارد</p>
+  <p class="hint"><span class="res-key yes">{{ icon('check') }}</span> رزرو شده · <span class="res-key">—</span> رزرو نشده · <span class="res-key none">·</span> غذا ندارد · <span class="res-key basket">{{ icon('basket') }}</span> داخل سبد، در انتظار فروش</p>
   </div>
 
   <div class="card stack">

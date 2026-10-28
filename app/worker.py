@@ -407,24 +407,48 @@ class Worker:
 
         return self.start_op(user_id, "بررسی رزروهای هفته", run, account_id=account_id)
 
+    @staticmethod
+    def _record_sale(account_id: int, date: str, meal: str, info: dict) -> str:
+        """Store what the sale page showed; returns a line for the user."""
+        food = info.get("food") or meal
+        if info["state"] == "listed":
+            db.save_sale(account_id, date, meal, "listed", info.get("food", ""), info.get("price", ""), info["status"])
+            price = f" به قیمت {info['price']}" if info.get("price") else ""
+            return f"«{food}» ({meal} {date}){price} داخل سبد است؛ در انتظار فروش"
+        if info["state"] == "gone":
+            db.save_sale(account_id, date, meal, "sold", info.get("food", ""), info.get("price", ""), info["status"])
+            return f"«{food}» ({meal} {date}) فروخته شد{': ' + info['status'] if info['status'] else ''}"
+        db.drop_sale(account_id, date, meal)  # back to a plain reservation
+        return f"«{food}» ({meal} {date}) داخل سبد نیست و هنوز رزرو توست"
+
     def sell_to_basket(self, user_id: int, account_id: int, date: str, meals: list[str]) -> bool:
-        """Sell reserved meals of `date` back to the food basket, then re-read the reservations."""
+        """Put reserved meals of `date` in the food basket for sale (sold when someone buys them)."""
         async def run(client: CullinanClient) -> str:
             done, failed = [], []
             for meal in meals:
                 try:
-                    done.append(await client.sell_to_basket(date, meal))
+                    done.append(self._record_sale(account_id, date, meal, await client.sell_to_basket(date, meal)))
                 except SiteError as exc:
                     failed.append(f"✗ {exc}")
-            try:
-                await self._sync_weeks(client, account_id)
-            except Exception:
-                log.exception("reservations re-read after a sale failed (account %s)", account_id)
             if failed and not done:
                 raise SiteError(" · ".join(failed))
             return " · ".join(done + failed)
 
         return self.start_op(user_id, "فروش به سبد غذایی", run, account_id=account_id)
+
+    def check_sale(self, user_id: int, account_id: int, date: str, meal: str) -> bool:
+        """Look once whether a meal waiting in the basket has been sold. Only on demand: never polled."""
+        async def run(client: CullinanClient) -> str:
+            return self._record_sale(account_id, date, meal, await client.sale_status(date, meal))
+
+        return self.start_op(user_id, "بررسی فروش سبد", run, account_id=account_id)
+
+    def cancel_sale(self, user_id: int, account_id: int, date: str, meal: str) -> bool:
+        """Take a meal waiting in the basket back out; it stays reserved."""
+        async def run(client: CullinanClient) -> str:
+            return self._record_sale(account_id, date, meal, await client.cancel_sale(date, meal))
+
+        return self.start_op(user_id, "حذف از سبد غذایی", run, account_id=account_id)
 
     def refresh_week_menu(self, user_id: int, account_id: int, auto: bool = False) -> bool:
         """Read this week's and next week's menu once and store it for everyone."""

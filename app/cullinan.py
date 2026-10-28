@@ -56,6 +56,7 @@ SALE_SEL = {
     "food": "#cphMain_lblFood, [id$='lblFood']",
     "price": "#cphMain_lblBasketSalePrice, [id$='lblBasketSalePrice']",
     "sell": "#cphMain_btnAccept, [id$='btnAccept']",
+    "cancel": "#cphMain_btnCancel, [id$='btnCancel']",  # «حذف از سبد غذا», shown while waiting in the basket
 }
 SALE_MEALS = {"صبحانه": "1", "ناهار": "2", "شام": "3"}
 WEEK_GRIDS = {"صبحانه": "Breakfast", "ناهار": "Lunch", "شام": "Dinner"}
@@ -512,39 +513,69 @@ class CullinanClient:
         return Attempt("bought", f"«{name}» ({rows[index]['label']}) خریداری شد. {message}".strip(), seen)
 
     # ---------------------------------------------------------- basket sale
-    async def _load_sale(self, page: Page, date: str, meal: str) -> bool:
-        """Show the weekly reservation of `date` / `meal` on the sale page; True if it can be sold."""
+    async def _visible(self, page: Page, selector: str) -> bool:
+        btn = page.locator(selector).first
+        return bool(await btn.count()) and await btn.is_visible() and await btn.is_enabled()
+
+    async def _load_sale(self, page: Page, date: str, meal: str) -> dict:
+        """Show the weekly reservation of `date` / `meal` on the sale page and read its state:
+        "reserved" (can be put in the basket), "listed" (waiting in the basket for a buyer)
+        or "gone" (no reservation any more: sold, or never reserved)."""
         await page.locator(SALE_SEL["date"]).first.evaluate("(el, v) => { el.value = v; }", date)
         await page.select_option(SALE_SEL["type"], "0")  # رزرو هفتگی
         await page.select_option(SALE_SEL["meal"], SALE_MEALS[meal])
         await self.throttle.wait(step=True)
         await self._postback(page, page.locator(SALE_SEL["load"]).first.click)
-        sell = page.locator(SALE_SEL["sell"]).first
-        return bool(await sell.count()) and await sell.is_visible() and await sell.is_enabled()
+        state = ("reserved" if await self._visible(page, SALE_SEL["sell"])
+                 else "listed" if await self._visible(page, SALE_SEL["cancel"]) else "gone")
+        status = norm(await self._text(page, SALE_SEL["status"]))
+        if not status:
+            status = norm(" ".join(self.dialogs[-1:]) + " " + await self._text(page, SEL["page_message"]))
+        return {"state": state, "status": status, "food": norm(await self._text(page, SALE_SEL["food"])),
+                "price": norm(await self._text(page, SALE_SEL["price"]))}
 
-    async def sell_to_basket(self, date: str, meal: str) -> str:
-        """Sell the weekly reservation of `date` / `meal` back to the food basket."""
+    async def _sale_page(self, meal: str) -> Page:
         if meal not in SALE_MEALS:
             raise SiteError(f"وعدهٔ «{meal}» شناخته نشد")
         self.dialogs.clear()
         page = await self._open(SALE_PATH)
         if await page.locator(SALE_SEL["load"]).count() == 0:
             raise SiteError("صفحهٔ فروش به سبد غذایی باز نشد")
-        if not await self._load_sale(page, date, meal):
-            why = norm(" ".join(self.dialogs) + " " + await self._text(page, SALE_SEL["status"]) + " "
-                       + await self._text(page, SEL["page_message"]))
-            raise SiteError(f"{meal} {date} قابل فروش نیست{': ' + why if why else ''}")
-        food = norm(await self._text(page, SALE_SEL["food"])) or meal
-        price = norm(await self._text(page, SALE_SEL["price"]))
+        return page
+
+    async def sale_status(self, date: str, meal: str) -> dict:
+        """Where the reservation of `date` / `meal` stands on the sale page (one load, read-only)."""
+        return await self._load_sale(await self._sale_page(meal), date, meal)
+
+    async def sell_to_basket(self, date: str, meal: str) -> dict:
+        """Put the weekly reservation of `date` / `meal` in the food basket for sale.
+        It is sold only when someone buys it; until then the state is "listed"."""
+        page = await self._sale_page(meal)
+        info = await self._load_sale(page, date, meal)
+        if info["state"] == "listed":
+            return info  # already waiting in the basket
+        if info["state"] != "reserved":
+            raise SiteError(f"{meal} {date} قابل فروش نیست{': ' + info['status'] if info['status'] else ''}")
         await self.throttle.wait(step=True)
         await self._postback(page, page.locator(SALE_SEL["sell"]).first.click)
-        message = norm(" ".join(self.dialogs) + " " + await self._text(page, SEL["page_message"]))
-        # Check on the page itself: the reservation must no longer be offered for sale.
-        page = await self._open(SALE_PATH)
-        if await self._load_sale(page, date, meal):
-            raise SiteError(f"فروش «{food}» ثبت نشد{': ' + message if message else ''}")
-        price_note = f" به قیمت {price}" if price else ""
-        return f"«{food}» ({meal} {date}){price_note} به سبد فروخته شد. {message}".strip()
+        message = norm(" ".join(self.dialogs[-1:]) + " " + await self._text(page, SEL["page_message"]))
+        after = await self._load_sale(page, date, meal)  # check on the page itself
+        if after["state"] == "reserved":
+            raise SiteError(f"گذاشتن «{info['food'] or meal}» در سبد ثبت نشد{': ' + message if message else ''}")
+        return {**info, **{k: v for k, v in after.items() if v}, "message": message}
+
+    async def cancel_sale(self, date: str, meal: str) -> dict:
+        """Take a meal waiting in the basket back out («حذف از سبد غذا»); it stays reserved."""
+        page = await self._sale_page(meal)
+        info = await self._load_sale(page, date, meal)
+        if info["state"] != "listed":
+            return info
+        await self.throttle.wait(step=True)
+        await self._postback(page, page.locator(SALE_SEL["cancel"]).first.click)
+        after = await self._load_sale(page, date, meal)
+        if after["state"] == "listed":
+            raise SiteError(f"حذف «{info['food'] or meal}» از سبد ثبت نشد")
+        return after
 
     # ---------------------------------------------------- weekly reservation
     async def read_week(self, date: str) -> dict[str, dict[str, dict]]:
