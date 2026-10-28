@@ -429,27 +429,12 @@
 
   <details class="card fold" id="charge">
     <summary>{{ icon('card') }}<span>افزایش اعتبار</span></summary>
-    <form method="post" action="/account/pay" class="stack">
-      <input type="hidden" name="account_id" value="{{ active_account.id }}">
-      <label class="field">مبلغ
-        <div class="input-addon">
-          <input type="text" name="amount" id="chargeAmount" required placeholder="۵۰,۰۰۰" inputmode="numeric">
-          <select name="unit" aria-label="واحد"><option value="toman" selected>تومان</option><option value="rial">ریال</option></select>
-        </div>
-      </label>
-      <div class="chips">
-        {% for a in [30000, 50000, 100000, 200000] %}<button type="button" class="chip" data-amount="{{ a }}">{{ '{:,}'.format(a) }}</button>{% endfor %}
-      </div>
-      <label class="field">درگاه بانکی
-        <select name="bank">
-          <option value="0" selected>سداد (بانک ملی)</option>
-          <option value="1">به‌پرداخت ملت</option>
-        </select>
-      </label>
-      <p class="note warn">{{ icon('alert') }} سلف فقط وقتی شارژ را تأیید می‌کند که در همان مرورگر گوشی وارد سامانهٔ سلف شده باشی؛ وگرنه شاپرک پول را برمی‌گرداند.</p>
-      <button class="btn ok block" {% if running %}disabled{% endif %}>{{ icon('bolt') }} گرفتن لینک درگاه</button>
-      <a class="btn ghost block" href="https://nut.uk.ac.ir/ePay/ePay_Payment.aspx" target="_blank" rel="noopener noreferrer">{{ icon('external') }} پرداخت از سایت سلف</a>
-    </form>
+    {# Paying through the panel is off: the bank returns to the site in the payer's browser, which
+       lacks the bot's site session, so the site never confirms it and the bank refunds the money. #}
+    <div class="stack">
+      <p class="note warn">{{ icon('alert') }} پرداخت از داخل پنل غیرفعال است: سایت سلف پرداختی را که ربات ساخته، بعد از برگشت از بانک تأیید نمی‌کند و بانک پول را چند دقیقه بعد برمی‌گرداند. مستقیم از سایت سلف پرداخت کن و بعد «استعلام موجودی» را بزن.</p>
+      <a class="btn ok block" href="https://nut.uk.ac.ir/ePay/ePay_Payment.aspx" target="_blank" rel="noopener noreferrer">{{ icon('external') }} پرداخت از سایت سلف</a>
+    </div>
   </details>
 
   <details class="card fold">

@@ -605,6 +605,12 @@ def account_health(request: Request, account_id: int = 0):
     }
 
 
+# Paying through the panel is off. The bot makes the payment in its own browser; the bank then
+# returns to the site in the payer's browser, which lacks the bot's site session, so the site
+# never confirms (verifies) the payment and the bank refunds it a few minutes later.
+PAYMENTS_OFF = "پرداخت از داخل پنل غیرفعال است؛ مستقیم از سایت سلف پرداخت کن."
+
+
 @app.post("/account/pay")
 async def request_pay(
     request: Request,
@@ -617,6 +623,8 @@ async def request_pay(
     if not uid:
         return _back("/login")
     account_id = int(account_id) if str(account_id).isdigit() else 0
+    if PAYMENTS_OFF:
+        return _back(f"/?account={account_id}#account", PAYMENTS_OFF, request)
     clean_amt = re.sub(r"[^\d]", "", norm(amount))
     if not clean_amt or int(clean_amt) <= 0:
         return _back(f"/?account={account_id}", "مبلغ افزایش اعتبار را به درستی وارد کن.", request)
@@ -638,7 +646,17 @@ async def request_pay(
 
 @app.get("/pay/gateway/{token}", response_class=HTMLResponse)
 def gateway_redirect(token: str):
-    sess = PAYMENT_SESSIONS.get(token) or getattr(worker, "PAYMENT_SESSIONS", {}).get(token)
+    if PAYMENTS_OFF:  # links handed out before: don't send anyone to the bank any more
+        return HTMLResponse(
+            f"""<!DOCTYPE html><html dir="rtl" lang="fa"><head><meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>body{{font-family:sans-serif;text-align:center;padding:50px 16px;background:#f7f3ec;color:#1d2125}}</style>
+            </head><body><h2>{PAYMENTS_OFF}</h2>
+            <a href="https://nut.uk.ac.ir/ePay/ePay_Payment.aspx" style="display:inline-block;padding:10px 20px;background:#15803d;color:#fff;text-decoration:none;border-radius:8px">پرداخت از سایت سلف</a>
+            </body></html>""",
+            status_code=410,
+        )
+    sess =PAYMENT_SESSIONS.get(token) or getattr(worker, "PAYMENT_SESSIONS", {}).get(token)
     if not sess:
         with db.tx() as c:
             row = c.execute("SELECT * FROM payment_sessions WHERE token = ?", (token,)).fetchone()

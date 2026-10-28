@@ -777,6 +777,20 @@ class UnitTest(unittest.TestCase):
         web.login_as_guest(req({}), invite="")
         web._guest_times.clear()
 
+    def test_payments_are_off(self):
+        from starlette.requests import Request
+
+        from app import web
+
+        session = {"uid": 1}
+        with db.tx() as c:
+            c.execute("INSERT OR IGNORE INTO users (id, username, password_hash, created_at) VALUES (1, 'u', 'x$y', 0)")
+        req = Request({"type": "http", "session": session})
+        asyncio.run(web.request_pay(req, account_id=1, amount="50000", unit="toman", bank=0))
+        self.assertEqual(session.get("flash"), web.PAYMENTS_OFF)
+        self.assertFalse(web.worker.busy(1))
+        self.assertEqual(web.gateway_redirect("anything").status_code, 410)
+
     def test_week_menu_is_shared_and_filters_picks(self):
         from app import web
 
