@@ -16,30 +16,51 @@ class RateLimited(Exception):
 
 
 class Throttle:
+    """Spacing and hourly caps for one account.
+
+    Arguments left as None follow the live settings in `config`, which the
+    admin can change from the panel (see app/limits.py).
+    """
+
     def __init__(
         self,
-        min_interval: float = config.POLL_SECONDS,
-        step_interval: float = config.STEP_SECONDS,
-        jitter: float = config.POLL_JITTER,
-        per_hour: int = config.MAX_REQUESTS_PER_HOUR,
-        logins_per_hour: int = config.MAX_LOGINS_PER_HOUR,
+        min_interval: float | None = None,
+        step_interval: float | None = None,
+        jitter: float | None = None,
+        per_hour: int | None = None,
+        logins_per_hour: int | None = None,
     ):
-        self.min_interval = max(config.MIN_POLL_FLOOR, min_interval)
-        self.step_interval = max(config.MIN_STEP_FLOOR, step_interval)
-        self.jitter = jitter
-        self.per_hour = per_hour
-        self.logins_per_hour = logins_per_hour
+        self._min = None if min_interval is None else max(config.MIN_POLL_FLOOR, min_interval)
+        self._step = None if step_interval is None else max(config.MIN_STEP_FLOOR, step_interval)
+        self._jitter = jitter
+        self._per_hour = per_hour
+        self._logins_per_hour = logins_per_hour
         self._last = -1e9
         self._hits: deque[float] = deque()
         self._logins: deque[float] = deque()
         self._lock = asyncio.Lock()
 
+    # Explicit values win; otherwise read config on every use so admin changes apply at once.
+    @staticmethod
+    def _setting(attr: str, name: str) -> property:
+        return property(
+            lambda self: getattr(config, name) if getattr(self, attr) is None else getattr(self, attr),
+            lambda self, v: setattr(self, attr, v),
+        )
+
+    min_interval = _setting("_min", "POLL_SECONDS")
+    step_interval = _setting("_step", "STEP_SECONDS")
+    jitter = _setting("_jitter", "POLL_JITTER")
+    per_hour = _setting("_per_hour", "MAX_REQUESTS_PER_HOUR")
+    logins_per_hour = _setting("_logins_per_hour", "MAX_LOGINS_PER_HOUR")
+
     @staticmethod
     def _check_window(hits: deque[float], cap: int) -> None:
+        """Drop hits older than an hour; raise if `cap` is reached (0 = no cap)."""
         now = time.monotonic()
         while hits and now - hits[0] > 3600:
             hits.popleft()
-        if len(hits) >= cap:
+        if cap > 0 and len(hits) >= cap:
             raise RateLimited(3600 - (now - hits[0]) + 1)
 
     def reset(self) -> None:
@@ -55,12 +76,13 @@ class Throttle:
             self._hits.popleft()
         while self._logins and now - self._logins[0] > 3600:
             self._logins.popleft()
+        hit_cap, login_cap = self.per_hour, self.logins_per_hour
         return {
             "hits": len(self._hits),
             "max_hits": self.per_hour,
             "logins": len(self._logins),
             "max_logins": self.logins_per_hour,
-            "is_limited": len(self._hits) >= self.per_hour or len(self._logins) >= self.logins_per_hour,
+            "is_limited": (0 < hit_cap <= len(self._hits)) or (0 < login_cap <= len(self._logins)),
         }
 
     def lane(self) -> "Throttle":
@@ -69,7 +91,9 @@ class Throttle:
         Used for on-demand runs (login test, menu fetch) so they don't queue
         behind a job's polling interval, while still counting toward the caps.
         """
-        other = Throttle(self.min_interval, self.step_interval, self.jitter, self.per_hour, self.logins_per_hour)
+        other = Throttle()
+        other._min, other._step, other._jitter = self._min, self._step, self._jitter
+        other._per_hour, other._logins_per_hour = self._per_hour, self._logins_per_hour
         other._hits, other._logins = self._hits, self._logins
         return other
 

@@ -8,8 +8,13 @@ FastAPI, Playwright, SQLite. See README.md (Persian) for architecture.
 - The real site is not reachable from the cloud sandbox; test against
   `tests/fake_site.py`. Selectors for the real site live in `SEL` in
   `app/cullinan.py`; refine them from `tools/dump_pages.py` output.
-- Never weaken the rate limits in `app/ratelimit.py` / `app/config.py`
-  (the user's account can be banned).
+- Never weaken the default rate limits in `app/config.py` / `app/ratelimit.py`
+  (the user's account can be banned). Admins tune them at runtime from
+  `/admin`; that goes through `app/limits.py` (stored in the `settings` table).
+- Never ship default credentials; admins come from the first sign-up or
+  `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
+- UI: Jinja templates + `app/static/style.css` + `app/static/app.js` (tabs,
+  live refresh of `[data-live]` regions). Mobile-first; check at 390px width.
 
 ## Conventions
 - Communicate with the user in Persian (Farsi); keep code, identifiers and commit messages in English.

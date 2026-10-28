@@ -16,6 +16,8 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, stored: str) -> bool:
+    if "$" not in stored:  # locked account
+        return False
     salt_hex, digest_hex = stored.split("$", 1)
     digest = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1)
     return hmac.compare_digest(digest.hex(), digest_hex)

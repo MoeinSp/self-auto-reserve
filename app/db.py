@@ -67,6 +67,11 @@ CREATE TABLE IF NOT EXISTS menus (
     fetched_at REAL NOT NULL,
     PRIMARY KEY (user_id, account_id, date)
 );
+-- Admin-editable runtime settings (rate limits), see app/limits.py.
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS payment_sessions (
     token TEXT PRIMARY KEY,
     action TEXT NOT NULL,
@@ -112,7 +117,16 @@ MIGRATIONS = [
     ("accounts", "created_at", "REAL NOT NULL DEFAULT 0"),
     ("menus", "account_id", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
+    # Result of the last login to the university site: '' (never) | ok | error.
+    ("accounts", "login_state", "TEXT NOT NULL DEFAULT ''"),
+    ("accounts", "login_message", "TEXT NOT NULL DEFAULT ''"),
+    ("accounts", "login_at", "REAL NOT NULL DEFAULT 0"),
 ]
+
+# An earlier version created user "admin" with this password, published in the
+# public repo. Accounts still using it are locked on startup.
+LEAKED_ADMIN_PASSWORD = "Admin@Self2026"
+LOCKED = "!"  # password_hash value that never verifies
 
 
 def init() -> None:
@@ -183,26 +197,58 @@ def init() -> None:
         c.execute("""
             UPDATE jobs
             SET account_id = (SELECT id FROM accounts WHERE accounts.user_id = jobs.user_id ORDER BY id LIMIT 1)
-            WHERE account_id IS NULL OR account_id = 0
+            WHERE (account_id IS NULL OR account_id = 0)
+              AND EXISTS (SELECT 1 FROM accounts WHERE accounts.user_id = jobs.user_id)
         """)
 
         # Update existing menus without an account_id
         c.execute("""
             UPDATE menus
             SET account_id = (SELECT id FROM accounts WHERE accounts.user_id = menus.user_id ORDER BY id LIMIT 1)
-            WHERE account_id IS NULL OR account_id = 0
+            WHERE (account_id IS NULL OR account_id = 0)
+              AND EXISTS (SELECT 1 FROM accounts WHERE accounts.user_id = menus.user_id)
         """)
 
-        # Ensure first user is admin
-        c.execute("UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users WHERE username != 'admin')")
+        _secure_admins(c)
 
-        # Create default admin user if 'admin' does not exist
-        if not c.execute("SELECT 1 FROM users WHERE username = 'admin'").fetchone():
-            from . import security
+
+def _secure_admins(c: sqlite3.Connection) -> None:
+    from . import security
+
+    row = c.execute("SELECT id, password_hash FROM users WHERE username = 'admin'").fetchone()
+    if row and security.verify_password(LEAKED_ADMIN_PASSWORD, row["password_hash"]):
+        c.execute("UPDATE users SET password_hash = ? WHERE id = ?", (LOCKED, row["id"]))
+
+    if config.ADMIN_USERNAME and config.ADMIN_PASSWORD:
+        row = c.execute("SELECT id, password_hash FROM users WHERE username = ?", (config.ADMIN_USERNAME,)).fetchone()
+        if not row:
             c.execute(
                 "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, 1, ?)",
-                ("admin", security.hash_password("Admin@Self2026"), time.time()),
+                (config.ADMIN_USERNAME, security.hash_password(config.ADMIN_PASSWORD), time.time()),
             )
+        else:
+            if not security.verify_password(config.ADMIN_PASSWORD, row["password_hash"]):
+                c.execute(
+                    "UPDATE users SET password_hash = ? WHERE id = ?",
+                    (security.hash_password(config.ADMIN_PASSWORD), row["id"]),
+                )
+            c.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (row["id"],))
+
+    # Nobody who can log in is an admin: promote the oldest usable user.
+    if not c.execute("SELECT 1 FROM users WHERE is_admin = 1 AND password_hash != ?", (LOCKED,)).fetchone():
+        c.execute(
+            "UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users WHERE password_hash != ?)",
+            (LOCKED,),
+        )
+
+
+def set_login_state(account_id: int, ok: bool, message: str = "") -> None:
+    """Remember whether the last login to the university site worked (shown in the panel)."""
+    with tx() as c:
+        c.execute(
+            "UPDATE accounts SET login_state = ?, login_message = ?, login_at = ? WHERE id = ?",
+            ("ok" if ok else "error", message, time.time(), account_id),
+        )
 
 
 def count_attempt(job_id: int, message: str) -> int:

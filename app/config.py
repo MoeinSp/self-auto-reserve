@@ -19,8 +19,13 @@ BASKET_PATH = _env("BASKET_PATH", "FoodBasket/FoodBasketBuy.aspx")
 # Generate one with: python -c "import secrets; print(secrets.token_urlsafe(48))"
 SECRET_KEY = _env("SECRET_KEY", "")
 INVITE_CODE = _env("INVITE_CODE", "")
+# Optional: make sure this panel user exists and is an admin (password is set on startup).
+ADMIN_USERNAME = _env("ADMIN_USERNAME", "")
+ADMIN_PASSWORD = _env("ADMIN_PASSWORD", "")
 
 # --- Rate limiting (protects the account from being blocked) ---
+# These are the defaults; an admin can override them from the panel at runtime
+# (stored in the DB, see app/limits.py).
 # Seconds between two polling rounds (each round = reload basket page, pick
 # date/meal, read the food list) for one account. Clamped to the floor.
 MIN_POLL_FLOOR = 5.0
@@ -33,9 +38,9 @@ MIN_STEP_FLOOR = 1.0
 STEP_SECONDS = max(MIN_STEP_FLOOR, float(_env("STEP_SECONDS", "1.5")))
 # Random extra delay, as a fraction of the interval (0.4 => +0..40%).
 POLL_JITTER = float(_env("POLL_JITTER", "0.4"))
-# Hard cap on requests per account per hour (all kinds together).
+# Hard cap on requests per account per hour (all kinds together); 0 = no cap.
 MAX_REQUESTS_PER_HOUR = int(_env("MAX_REQUESTS_PER_HOUR", "500"))
-# Login attempts (each one includes a captcha) per account per hour.
+# Login attempts (each one includes a captcha) per account per hour; 0 = no cap.
 MAX_LOGINS_PER_HOUR = int(_env("MAX_LOGINS_PER_HOUR", "6"))
 
 # Captcha: OCR attempts before falling back to asking the user in the panel.

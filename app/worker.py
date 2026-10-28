@@ -139,15 +139,7 @@ class Worker:
 
     def get_throttle_stats(self, account_id: int) -> dict:
         t = self.throttles.get(account_id)
-        if t:
-            return t.stats()
-        return {
-            "hits": 0,
-            "max_hits": config.MAX_REQUESTS_PER_HOUR,
-            "logins": 0,
-            "max_logins": config.MAX_LOGINS_PER_HOUR,
-            "is_limited": False,
-        }
+        return (t or Throttle()).stats()
 
     def client_for(self, account_id: int, own_lane: bool = False) -> CullinanClient:
         with db.tx() as c:
@@ -196,11 +188,14 @@ class Worker:
             try:
                 op["message"] = await asyncio.wait_for(run(client), OP_TIMEOUT)
                 op["state"] = "ok"
+                db.set_login_state(account_id, True)
                 db.log(user_id, f"{title}: {op['message']}", "success")
             except Exception as exc:
                 if not isinstance(exc, (LoginFailed, RateLimited, SiteError, asyncio.TimeoutError)):
                     log.exception("%s failed for user %s (account %s)", title, user_id, account_id)
                 op["state"], op["message"] = "error", _explain(exc)
+                if isinstance(exc, LoginFailed):
+                    db.set_login_state(account_id, False, op["message"])
                 db.log(user_id, f"{title} ناموفق: {op['message']}", "error")
             finally:
                 op["finished"] = time.time()
@@ -356,6 +351,7 @@ class Worker:
         user_id = acc["user_id"]
         client = self.client_for(account_id)
         backoff = 30
+        login_ok = False  # login state already recorded for this run
         try:
             while True:
                 with db.tx() as c:
@@ -386,6 +382,9 @@ class Worker:
                             continue
                         result = await client.attempt(job)
                         backoff = 30
+                        if not login_ok:
+                            db.set_login_state(account_id, True)
+                            login_ok = True
                         # If profile name found and not saved, save it
                         if client.display_name and not acc["display_name"]:
                             with db.tx() as c:
@@ -393,13 +392,15 @@ class Worker:
                         self._handle(user_id, row, result, acc["display_name"] or acc["site_username"])
                     except LoginFailed as exc:
                         msg = _explain(exc)
+                        db.set_login_state(account_id, False, msg)
                         for j in jobs:
                             db.set_job_status(j["id"], "failed", msg)
                         db.log(user_id, f"[{acc['display_name'] or acc['site_username']}]: {msg}", "error")
                         return
                     except RateLimited as exc:
                         db.set_job_message(row["id"], "سقف درخواست ساعتی پر شد؛ صبر می‌کنم")
-                        await asyncio.sleep(exc.retry_after)
+                        # Short naps: the admin may raise the cap or reset the counter meanwhile.
+                        await asyncio.sleep(min(exc.retry_after, 30))
                     except Exception as exc:
                         log.exception("job %s failed", row["id"])
                         reason = _explain(exc)

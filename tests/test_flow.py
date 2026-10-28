@@ -437,5 +437,76 @@ class UnitTest(unittest.TestCase):
             self.assertEqual(updated["auto_reserve_meals"], "ناهار,شام")
 
 
+    def test_admin_settings_change_limits_live(self):
+        from starlette.requests import Request
+        from app import web, limits
+
+        config.SECRET_KEY = "test-secret"
+        with db.tx() as c:
+            c.execute("DELETE FROM users")
+            c.execute("INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (1, 'boss', 'x$y', 1, 0)")
+            c.execute("INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (2, 'joe', 'x$y', 0, 0)")
+        t = Throttle()
+        try:
+            # Non-admins can't change anything.
+            web.admin_save_settings(Request({"type": "http", "session": {"uid": 2}}), MAX_REQUESTS_PER_HOUR="7")
+            self.assertEqual(t.per_hour, limits.DEFAULTS["MAX_REQUESTS_PER_HOUR"])
+
+            req = Request({"type": "http", "session": {"uid": 1}})
+            web.admin_save_settings(req, MAX_REQUESTS_PER_HOUR="۹۰۰", POLL_SECONDS="2", POLL_JITTER="10")
+            self.assertEqual((t.per_hour, t.min_interval, t.jitter), (900, 2.0, 0.1))
+
+            # "No cap": the hourly window never raises.
+            web.admin_save_settings(req, no_request_cap="1")
+            self.assertEqual(t.per_hour, 0)
+            t._hits.extend([time.monotonic()] * 5000)
+            Throttle._check_window(t._hits, t.per_hour)
+            self.assertFalse(t.stats()["is_limited"])
+
+            # Stored settings survive a restart.
+            config.MAX_REQUESTS_PER_HOUR = 123
+            limits.load()
+            self.assertEqual(config.MAX_REQUESTS_PER_HOUR, 0)
+        finally:
+            limits.reset()
+        self.assertEqual(t.per_hour, limits.DEFAULTS["MAX_REQUESTS_PER_HOUR"])
+
+    def test_leaked_default_admin_is_locked(self):
+        from starlette.requests import Request
+        from app import security, web
+
+        with db.tx() as c:
+            c.execute("DELETE FROM users")
+            c.execute(
+                "INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (5, 'admin', ?, 1, 0)",
+                (security.hash_password(db.LEAKED_ADMIN_PASSWORD),),
+            )
+            c.execute("INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (1, 'real', 'x$y', 0, 0)")
+        db.init()
+        with db.tx() as c:
+            rows = {r["username"]: r for r in c.execute("SELECT * FROM users")}
+        self.assertEqual(rows["admin"]["password_hash"], db.LOCKED)
+        self.assertEqual(rows["real"]["is_admin"], 1)  # someone usable is admin
+        # An old session cookie of the locked user stops working.
+        req = Request({"type": "http", "session": {"uid": 5}})
+        self.assertIsNone(web._uid(req))
+        self.assertFalse(security.verify_password(db.LEAKED_ADMIN_PASSWORD, db.LOCKED))
+
+    def test_account_status_is_per_account(self):
+        from app import web
+
+        with db.tx() as c:
+            c.execute("DELETE FROM users")
+            c.execute("INSERT INTO users (id, username, password_hash, created_at) VALUES (1, 'u', 'x$y', 0)")
+            c.execute("DELETE FROM accounts")
+            c.execute("INSERT INTO accounts (id, user_id, site_username, site_password_enc) VALUES (21, 1, '1', 'e')")
+            c.execute("INSERT INTO accounts (id, user_id, site_username, site_password_enc) VALUES (22, 1, '2', 'e')")
+        db.set_login_state(21, False, "رمز اشتباه")
+        db.set_login_state(22, True)
+        with db.tx() as c:
+            a, b = (c.execute("SELECT * FROM accounts WHERE id = ?", (i,)).fetchone() for i in (21, 22))
+        self.assertEqual(web.account_status(a)["status"], "expired")
+        self.assertEqual(web.account_status(b)["status"], "online")
+
 if __name__ == "__main__":
     unittest.main()

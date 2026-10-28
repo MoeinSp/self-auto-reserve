@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import captcha, config, db, jalali, security
+from . import captcha, config, db, jalali, limits, security
 from .text import norm, parse_foods
 from .worker import PAYMENT_SESSIONS, worker
 
@@ -22,6 +22,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=HERE / "templates")
 templates.env.filters["ts"] = jalali.format_ts
+templates.env.filters["num"] = lambda x: f"{float(x or 0):g}"  # 20.0 -> 20, 1.5 -> 1.5
 
 MEALS = ["", "صبحانه", "ناهار", "شام"]
 STATUS_FA = {"active": "در حال پیگیری", "done": "خریداری شد", "stopped": "متوقف", "failed": "ناموفق"}
@@ -33,6 +34,7 @@ async def lifespan(app: FastAPI):
     if not config.SECRET_KEY:
         raise RuntimeError("SECRET_KEY env var is required (see .env.example)")
     db.init()
+    limits.load()
     await worker.start()
     yield
     await worker.stop()
@@ -47,7 +49,15 @@ app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 
 
 def _uid(request: Request) -> int | None:
-    return request.session.get("uid")
+    uid = request.session.get("uid")
+    if not uid:
+        return None
+    with db.tx() as c:
+        row = c.execute("SELECT password_hash FROM users WHERE id = ?", (uid,)).fetchone()
+    if not row or row["password_hash"] == db.LOCKED:  # deleted or locked user: drop the old cookie
+        request.session.clear()
+        return None
+    return uid
 
 
 def _back(path: str = "/", flash: str | None = None, request: Request | None = None) -> RedirectResponse:
@@ -91,14 +101,14 @@ def register(
             return _back("/login", "رمز پنل حداقل ۸ کاراکتر باشد", request)
         try:
             cur = c.execute(
-                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                (username.strip(), security.hash_password(password), time.time()),
+                "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, ?, ?)",
+                (username.strip(), security.hash_password(password), 1 if first_user else 0, time.time()),
             )
         except Exception:
             return _back("/login", "این نام کاربری قبلاً ثبت شده", request)
     request.session.clear()
     request.session["uid"] = cur.lastrowid
-    return _back("/", "ثبت‌نام انجام شد. حالا اطلاعات ورود سامانهٔ سلف را وارد کن.", request)
+    return _back("/#account", "ثبت‌نام انجام شد. حالا اطلاعات ورود سامانهٔ سلف را وارد کن.", request)
 
 
 @app.post("/logout")
@@ -127,6 +137,23 @@ def _get_active_account(request: Request, accounts: list):
         request.session["active_account_id"] = accounts[0]["id"]
         return accounts[0], accounts[0]["id"]
     return None, None
+
+
+def account_status(acc) -> dict:
+    """Connection state of one site account, for the panel."""
+    op = worker.ops.get(acc["user_id"])
+    task = worker.tasks.get(acc["id"])
+    if op and op.get("state") == "running" and op.get("account_id") == acc["id"]:
+        status, text = "checking", f"در حال انجام: {op.get('title', 'عملیات')}"
+    elif acc["login_state"] == "error":
+        status, text = "expired", acc["login_message"] or "ورود ناموفق بود؛ رمز را بررسی کن"
+    elif task is not None and not task.done():
+        status, text = "online", "متصل · ربات در حال پیگیری سبد"
+    elif acc["login_state"] == "ok":
+        status, text = "online", f"آخرین ورود موفق: {jalali.format_ts(acc['login_at'])}"
+    else:
+        status, text = "unknown", "هنوز وارد سامانه نشده؛ «تست ورود» را بزن"
+    return {"status": status, "text": text, "throttle": worker.get_throttle_stats(acc["id"])}
 
 
 # ------------------------------------------------------------- dashboard
@@ -163,12 +190,14 @@ def dashboard(request: Request):
                 (uid, jalali.today_str()),
             ).fetchone()
     menu = json.loads(menu_row["data"]) if menu_row else None
+    statuses = {acc["id"]: account_status(acc) for acc in accounts}
     return _render(
         request, "dashboard.html", user=user, accounts=accounts,
         active_account=active_account, active_id=active_id,
         jobs=jobs, logs=logs,
         today=jalali.today_str(), captcha_pending=captcha.manual.pending(uid),
         poll_seconds=config.POLL_SECONDS, max_per_hour=config.MAX_REQUESTS_PER_HOUR,
+        min_job_interval=config.MIN_JOB_INTERVAL, statuses=statuses,
         op=worker.ops.get(uid), now=time.time(),
         menu=menu, menu_date=menu_row["date"] if menu_row else None,
         menu_at=menu_row["fetched_at"] if menu_row else None,
@@ -240,7 +269,7 @@ def save_account(
     task = worker.tasks.pop(saved_id, None)
     if task:
         task.cancel()
-    return _back(f"/?account={saved_id}", flash, request)
+    return _back(f"/?account={saved_id}#account", flash, request)
 
 
 @app.post("/account/test")
@@ -278,7 +307,7 @@ async def test_account(
     request.session["active_account_id"] = account_id
     if not worker.test_login(uid, account_id):
         return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
-    return _back(f"/?account={account_id}")
+    return _back(f"/?account={account_id}#account")
 
 
 @app.post("/account/delete")
@@ -319,7 +348,7 @@ async def sync_credit(request: Request, account_id: int = Form(...)):
     request.session["active_account_id"] = account_id
     if not worker.sync_account_profile(uid, account_id):
         return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
-    return _back(f"/?account={account_id}")
+    return _back(f"/?account={account_id}#account")
 
 
 @app.post("/account/auto-reserve")
@@ -345,7 +374,7 @@ def save_auto_reserve(
             (is_active, meals_str, account_id),
         )
     status_str = "فعال شد (چهارشنبه‌ها برای هفته بعد)" if is_active else "غیرفعال شد"
-    return _back(f"/?account={account_id}", f"تنظیمات رزرو خودکار هفتگی {status_str}.", request)
+    return _back(f"/?account={account_id}#tools", f"تنظیمات رزرو خودکار هفتگی {status_str}.", request)
 
 
 @app.post("/account/auto-reserve/run-now")
@@ -361,7 +390,7 @@ async def run_auto_reserve_now(request: Request, account_id: int = Form(...)):
     request.session["active_account_id"] = account_id
     if not worker.run_auto_reserve(uid, account_id):
         return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
-    return _back(f"/?account={account_id}")
+    return _back(f"/?account={account_id}#tools")
 
 
 @app.post("/forgot-receipt")
@@ -386,7 +415,7 @@ async def get_forgot_receipt_endpoint(
     request.session["active_account_id"] = account_id
     if not worker.fetch_forgot_receipt(uid, account_id, day, meal if meal in MEALS else "", str(reserve_type)):
         return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
-    return _back(f"/?account={account_id}")
+    return _back(f"/?account={account_id}#tools")
 
 
 @app.get("/api/account/health")
@@ -398,47 +427,15 @@ def account_health(request: Request, account_id: int = 0):
         acc = c.execute("SELECT * FROM accounts WHERE id = ? AND user_id = ?", (account_id, uid)).fetchone()
     if not acc:
         return {"status": "unknown", "status_text": "حسابی انتخاب نشده"}
-
-    op = worker.ops.get(uid)
-    if op and op.get("state") == "running":
-        return {
-            "status": "checking",
-            "status_text": f"در حال پردازش: {op.get('title', 'عملیات')}",
-            "credit": acc["credit"],
-            "display_name": acc["display_name"] or acc["site_username"],
-        }
-
-    with db.tx() as c:
-        last_err = c.execute(
-            "SELECT message FROM logs WHERE user_id = ? AND level = 'error' ORDER BY id DESC LIMIT 1",
-            (uid,)
-        ).fetchone()
-
-    is_failed = False
-    if last_err and any(w in last_err["message"] for w in ("رمز اشتباه", "LoginFailed", "ورود ناموفق")):
-        is_failed = True
-
-    is_task_active = (account_id in worker.tasks and not worker.tasks[account_id].done())
-
-    if is_failed:
-        status = "expired"
-        status_text = "نشست سلف منقضی شده / رمز یا کپچا نامعتبر"
-    elif is_task_active:
-        status = "online"
-        status_text = "لاگین سلف فعال و متصل (سشن معتبر)"
-    elif acc["credit"]:
-        status = "online"
-        status_text = f"لاگین فعال و متصل به سلف ({acc['display_name'] or acc['site_username']})"
-    else:
-        status = "checking"
-        status_text = "آماده بررسی و ورود به سامانه"
-
+    st = account_status(acc)
     return {
-        "status": status,
-        "status_text": status_text,
+        "status": st["status"],
+        "status_text": st["text"],
         "credit": acc["credit"],
         "credit_updated_at": jalali.format_ts(acc["credit_updated_at"]) if acc["credit_updated_at"] else "",
         "display_name": acc["display_name"] or acc["site_username"],
+        "requests_hour": st["throttle"]["hits"],
+        "max_requests_hour": st["throttle"]["max_hits"],
     }
 
 
@@ -470,7 +467,7 @@ async def request_pay(
     request.session["active_account_id"] = account_id
     if not worker.request_payment_gateway(uid, account_id, amount_rials, int(bank)):
         return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
-    return _back(f"/?account={account_id}")
+    return _back(f"/?account={account_id}#account")
 
 
 @app.get("/pay/gateway/{token}", response_class=HTMLResponse)
@@ -501,15 +498,16 @@ def gateway_redirect(token: str):
         )
 
     action = sess["action"]
+    if not str(action).startswith(("https://", "http://")):
+        return HTMLResponse("آدرس درگاه نامعتبر است", status_code=400)
     fields = sess.get("fields", {})
-    bank = sess.get("bank", "درگاه شاپرک")
+    bank = html.escape(str(sess.get("bank", "درگاه شاپرک")))
     amt_str = f"{sess.get('amount_rials', 0):,} ریال"
 
     # If gateway expects GET (like Sadad/Melli) or there are no POST form fields, redirect directly!
     if sess.get("method") == "GET" or not fields:
         return RedirectResponse(action, status_code=303)
 
-    import html
     inputs_html = "\n".join(
         f'<input type="hidden" name="{html.escape(str(k), quote=True)}" value="{html.escape(str(v), quote=True)}">'
         for k, v in fields.items()
@@ -534,7 +532,7 @@ def gateway_redirect(token: str):
     <h3>در حال اتصال امن به {bank} (شاپرک)</h3>
     <p>مبلغ: <strong>{amt_str}</strong></p>
     <p style="font-size:13px;color:#6b6f76">تا چند لحظه دیگر به درگاه پرداخت بانکی منتقل می‌شوید...</p>
-    <form id="payForm" method="POST" action="{action}">
+    <form id="payForm" method="POST" action="{html.escape(action, quote=True)}">
       {inputs_html}
       <noscript><button type="submit" class="btn">ورود به درگاه بانکی</button></noscript>
     </form>
@@ -571,7 +569,7 @@ async def fetch_menu(
 
     if not worker.fetch_menu(uid, account_id, day, meal if meal in MEALS else ""):
         return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
-    return _back(f"/?account={account_id}")
+    return _back(f"/?account={account_id}#buy")
 
 
 def _picked_foods(uid: int, menu_date: str, picks: list[str], account_id: int = 0) -> dict[str, list[str]]:
@@ -654,7 +652,7 @@ def create_job(
                  _poll_seconds(poll_seconds), 1 if skip_if_reserved else 0, now, now),
             )
     label = f"کار جدید برای «{acc_name}» اضافه شد" if len(wanted) == 1 else f"{len(wanted)} کار جدید برای «{acc_name}» اضافه شد"
-    return _back(f"/?account={account_id}", f"{label}؛ ربات شروع به پیگیری سبد می‌کند.", request)
+    return _back(f"/?account={account_id}#jobs", f"{label}؛ ربات شروع به پیگیری سبد می‌کند.", request)
 
 
 def _poll_seconds(value: float) -> float:
@@ -683,7 +681,7 @@ def job_action(request: Request, job_id: int, action: str, poll_seconds: float =
                 "UPDATE jobs SET status = ?, message = '', updated_at = ? WHERE id = ? AND user_id = ?",
                 (status, time.time(), job_id, uid),
             )
-    return _back("/")
+    return _back("/#jobs")
 
 
 # --------------------------------------------------------------- captcha
@@ -774,7 +772,53 @@ def admin_page(request: Request):
         total_users=total_users, total_accounts=total_accounts, active_jobs=active_jobs,
         max_requests_hour=config.MAX_REQUESTS_PER_HOUR,
         max_logins_hour=config.MAX_LOGINS_PER_HOUR,
+        limits=limits.current(), limit_defaults=limits.DEFAULTS,
     )
+
+
+@app.post("/admin/settings")
+def admin_save_settings(
+    request: Request,
+    POLL_SECONDS: str = Form(""),
+    MIN_JOB_INTERVAL: str = Form(""),
+    STEP_SECONDS: str = Form(""),
+    POLL_JITTER: str = Form(""),
+    MAX_REQUESTS_PER_HOUR: str = Form(""),
+    MAX_LOGINS_PER_HOUR: str = Form(""),
+    no_request_cap: str = Form(""),
+    no_login_cap: str = Form(""),
+):
+    if not _is_admin(request):
+        return _back("/", "دسترسی مجاز نیست.", request)
+    values = {
+        "POLL_SECONDS": POLL_SECONDS, "MIN_JOB_INTERVAL": MIN_JOB_INTERVAL, "STEP_SECONDS": STEP_SECONDS,
+        "POLL_JITTER": POLL_JITTER, "MAX_REQUESTS_PER_HOUR": MAX_REQUESTS_PER_HOUR,
+        "MAX_LOGINS_PER_HOUR": MAX_LOGINS_PER_HOUR,
+    }
+    # Non-str values are FastAPI Form() defaults when called directly (tests).
+    values = {k: norm(v).strip() for k, v in values.items() if isinstance(v, str) and norm(v).strip()}
+    if "POLL_JITTER" in values:  # entered as a percentage
+        try:
+            values["POLL_JITTER"] = float(values["POLL_JITTER"]) / 100
+        except ValueError:
+            pass
+    if no_request_cap is True or (isinstance(no_request_cap, str) and no_request_cap):
+        values["MAX_REQUESTS_PER_HOUR"] = 0
+    if no_login_cap is True or (isinstance(no_login_cap, str) and no_login_cap):
+        values["MAX_LOGINS_PER_HOUR"] = 0
+    try:
+        limits.save(values)
+    except ValueError:
+        return _back("/admin#settings", "مقدارها باید عدد باشند.", request)
+    return _back("/admin#settings", "تنظیمات محدودیت ذخیره شد و همین حالا اعمال شد.", request)
+
+
+@app.post("/admin/settings/reset")
+def admin_reset_settings(request: Request):
+    if not _is_admin(request):
+        return _back("/", "دسترسی مجاز نیست.", request)
+    limits.reset()
+    return _back("/admin#settings", "تنظیمات محدودیت به پیش‌فرض برگشت.", request)
 
 
 @app.post("/admin/rate-limit/reset")
@@ -791,12 +835,12 @@ def admin_reset_rate_limit(request: Request, account_id: int = Form(0)):
             )
             acc = c.execute("SELECT display_name, site_username FROM accounts WHERE id = ?", (account_id,)).fetchone()
             name = (acc["display_name"] or acc["site_username"]) if acc else f"حساب #{account_id}"
-        return _back("/admin", f"محدودیت (Rate Limit) برای «{name}» صفر شد.", request)
+        return _back("/admin#accounts", f"شمارندهٔ درخواست‌های «{name}» صفر شد.", request)
     else:
         count = worker.reset_throttle()
         with db.tx() as c:
             c.execute("UPDATE jobs SET message = '' WHERE message LIKE '%سقف%'")
-        return _back("/admin", f"محدودیت (Rate Limit) برای تمام {count} حساب صفر شد.", request)
+        return _back("/admin#accounts", f"شمارندهٔ درخواست‌های هر {count} حساب صفر شد.", request)
 
 
 @app.post("/admin/users/{target_uid}/role")
@@ -813,7 +857,7 @@ def admin_toggle_role(request: Request, target_uid: int):
         new_role = 0 if u["is_admin"] else 1
         c.execute("UPDATE users SET is_admin = ? WHERE id = ?", (new_role, target_uid))
         role_label = "مدیر" if new_role else "کاربر عادی"
-    return _back("/admin", f"نقش کاربر «{u['username']}» به {role_label} تغییر یافت.", request)
+    return _back("/admin#users", f"نقش کاربر «{u['username']}» به {role_label} تغییر یافت.", request)
 
 
 @app.post("/admin/users/{target_uid}/delete")
@@ -833,7 +877,7 @@ def admin_delete_user(request: Request, target_uid: int):
             if t:
                 t.cancel()
         c.execute("DELETE FROM users WHERE id = ?", (target_uid,))
-    return _back("/admin", f"کاربر «{u['username']}» و تمام اطلاعات مربوطه حذف شدند.", request)
+    return _back("/admin#users", f"کاربر «{u['username']}» و تمام اطلاعات مربوطه حذف شدند.", request)
 
 
 @app.post("/admin/jobs/{job_id}/{action}")
@@ -846,4 +890,4 @@ def admin_job_action(request: Request, job_id: int, action: str):
         elif action in ("stop", "resume"):
             status = "stopped" if action == "stop" else "active"
             c.execute("UPDATE jobs SET status = ?, message = '', updated_at = ? WHERE id = ?", (status, time.time(), job_id))
-    return _back("/admin")
+    return _back("/admin#jobs")
