@@ -90,6 +90,7 @@ class Worker:
         self.auto_reserve_tried: dict[int, float] = {}  # account id -> time of the last scheduled auto-reserve
         self.credit_reading: set[int] = set()  # accounts with a scheduled credit read running
         self.sessions: dict[int, tuple] = {}  # account id -> (logged-in BrowserContext, last use), see _lend_session
+        self.session_users: dict[int, int] = {}  # account id -> runs using its kept session right now
         self._pw = None
         self.browser = None
 
@@ -216,28 +217,38 @@ class Worker:
         )
 
     # ---------------------------------------------------- kept site sessions
-    # On-demand runs reuse the account's logged-in browser context, so they skip the
-    # login (and its captcha): one page load instead of 10-45 s. The site drops idle
-    # sessions after a while; then login() just signs in again.
-    def _lend_session(self, account_id: int, client: CullinanClient) -> bool:
+    # All runs of an account (on-demand operations and basket jobs) share its logged-in
+    # browser context, each in its own tab, so they skip the login (and its captcha): one
+    # page load instead of 10-45 s. A session unused for SESSION_IDLE is closed; if the
+    # site drops it earlier, the next page that lands on the login form signs in again.
+    async def _lend_session(self, account_id: int, client: CullinanClient) -> None:
+        """Give `client` the account's shared session (made now if there is none or it went idle)."""
         client.keep_context = True
-        kept = self.sessions.pop(account_id, None)
-        if kept and time.time() - kept[1] < SESSION_IDLE:
-            client.context = kept[0]
-            return True
-        if kept:
-            asyncio.get_running_loop().create_task(self._close_context(kept[0]))
-        return False
+        kept = self.sessions.get(account_id)
+        if kept and not self.session_users.get(account_id) and time.time() - kept[1] >= SESSION_IDLE:
+            del self.sessions[account_id]
+            await self._close_context(kept[0])
+            kept = None
+        if kept is None:
+            kept = self.sessions[account_id] = (await client._new_context(), time.time())
+        client.context = kept[0]
+        self.session_users[account_id] = self.session_users.get(account_id, 0) + 1
 
-    async def _return_session(self, account_id: int, client: CullinanClient, keep: bool, reused: bool) -> None:
-        await client.close()  # the page only
-        context = client.context
+    async def _return_session(self, account_id: int, client: CullinanClient, keep: bool = True) -> None:
+        """Close the client's tab; the session stays for the next run unless the login failed."""
+        await client.close()
+        self.session_users[account_id] = max(0, self.session_users.get(account_id, 1) - 1)
+        context, kept = client.context, self.sessions.get(account_id)
         if context is None:
             return
-        if keep and account_id not in self.sessions:
-            self.sessions[account_id] = (context, time.time())
-        else:
-            await self._close_context(context)
+        if kept and kept[0] is context:
+            if keep:
+                self.sessions[account_id] = (context, time.time())
+                return
+            del self.sessions[account_id]  # nobody should use this session again
+            if self.session_users.get(account_id):
+                return  # still open in another run's tab; closed when that one ends
+        await self._close_context(context)
 
     @staticmethod
     async def _close_context(context) -> None:
@@ -249,7 +260,7 @@ class Worker:
     def _drop_idle_sessions(self) -> None:
         now = time.time()
         for aid, (context, used) in list(self.sessions.items()):
-            if now - used >= SESSION_IDLE:
+            if not self.session_users.get(aid) and now - used >= SESSION_IDLE:
                 del self.sessions[aid]
                 asyncio.get_running_loop().create_task(self._close_context(context))
 
@@ -278,7 +289,7 @@ class Worker:
             client = self.client_for(account_id, own_lane=True)
             client.interactive = True
             client.step = step
-            reused = self._lend_session(account_id, client)
+            await self._lend_session(account_id, client)
             keep = False
             try:
                 op["message"] = await asyncio.wait_for(run(client), OP_TIMEOUT)
@@ -290,13 +301,13 @@ class Worker:
                 if not isinstance(exc, (LoginFailed, RateLimited, SiteError, asyncio.TimeoutError)):
                     log.exception("%s failed for user %s (account %s)", title, user_id, account_id)
                 op["state"], op["message"] = "error", _explain(exc)
-                keep = isinstance(exc, SiteError)  # the session itself is still fine
+                keep = not isinstance(exc, LoginFailed)  # only a failed login spoils the session
                 if isinstance(exc, LoginFailed):
                     db.set_login_state(account_id, False, op["message"])
                 db.log(user_id, f"{title} ناموفق: {op['message']}", "error")
             finally:
                 op["finished"] = time.time()
-                await self._return_session(account_id, client, keep, reused)
+                await self._return_session(account_id, client, keep)
 
         try:
             asyncio.get_running_loop().create_task(go())
@@ -308,7 +319,7 @@ class Worker:
     def test_login(self, user_id: int, account_id: int) -> bool:
         async def run(client: CullinanClient) -> str:
             started = time.monotonic()
-            await client.login()
+            await client.home()
             profile = await client.read_profile()
             name = profile.get("name") or client.username
             credit = profile.get("credit", "")
@@ -333,7 +344,7 @@ class Worker:
     def sync_account_profile(self, user_id: int, account_id: int) -> bool:
         async def run(client: CullinanClient) -> str:
             started = time.monotonic()
-            await client.login()
+            await client.home()
             profile = await client.read_profile()
             name = profile.get("name") or client.username
             credit = profile.get("credit", "")
@@ -351,7 +362,7 @@ class Worker:
     def fetch_forgot_receipt(self, user_id: int, account_id: int, date: str, meal: str, reserve_type: str = "0") -> bool:
         async def run(client: CullinanClient) -> str:
             started = time.monotonic()
-            await client.login()
+            await client.ensure_login()
             res = await client.get_forgot_receipt(date, meal, reserve_type)
             day_name = jalali.weekday_name(date)
             date_label = f"{day_name} {date}" if day_name else date
@@ -372,7 +383,7 @@ class Worker:
 
     def run_auto_reserve(self, user_id: int, account_id: int, target_week_date: str = "") -> bool:
         async def run(client: CullinanClient) -> str:
-            await client.login()
+            await client.ensure_login()
             with db.tx() as c:
                 acc = c.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
             meals_str = acc["auto_reserve_meals"] if acc and acc["auto_reserve_meals"] else "ناهار,شام"
@@ -397,7 +408,7 @@ class Worker:
 
     def request_payment_gateway(self, user_id: int, account_id: int, amount_rials: int, bank_idx: int = 0) -> bool:
         async def run(client: CullinanClient) -> str:
-            await client.login()
+            await client.ensure_login()
             data = await client.create_payment_session(amount_rials, bank_idx)
             import secrets
             token = secrets.token_urlsafe(16)
@@ -520,7 +531,8 @@ class Worker:
             if not acc:
                 return
             client = self.client_for(account_id, own_lane=True)
-            await client.login()
+            await self._lend_session(account_id, client)
+            await client.home()
             credit = self._save_credit(client, account_id, await client.read_profile())
             if credit:
                 db.log(acc["user_id"], f"موجودی سلف خودکار استعلام شد: {credit}", "info")
@@ -529,7 +541,7 @@ class Worker:
         finally:
             self.credit_reading.discard(account_id)
             if client:
-                await client.close()
+                await self._return_session(account_id, client)
 
     @staticmethod
     def _record_sale(account_id: int, date: str, meal: str, info: dict) -> str:
@@ -642,6 +654,8 @@ class Worker:
             return
         user_id = acc["user_id"]
         client = self.client_for(account_id)
+        await self._lend_session(account_id, client)
+        keep = True
         backoff = 30
         login_ok = False  # login state already recorded for this run
         try:
@@ -692,6 +706,7 @@ class Worker:
                         for j in jobs:
                             db.set_job_status(j["id"], "failed", msg)
                         db.log(user_id, f"[{acc['display_name'] or acc['site_username']}]: {msg}", "error")
+                        keep = False
                         return
                     except RateLimited as exc:
                         db.set_job_message(row["id"], "سقف درخواست ساعتی پر شد؛ صبر می‌کنم")
@@ -708,7 +723,7 @@ class Worker:
                 if not ran:
                     await asyncio.sleep(IDLE_SECONDS)
         finally:
-            await client.close()
+            await self._return_session(account_id, client, keep)
 
     async def _reserved_food(self, client: CullinanClient, row) -> str:
         """The food already reserved for the job's meal ("" if none): with a reservation the site

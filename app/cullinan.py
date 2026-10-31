@@ -375,6 +375,19 @@ class CullinanClient:
         return {"name": name, "credit": credit}
 
     # ---------------------------------------------------------------- login
+    async def ensure_login(self) -> None:
+        """Log in unless this client runs on a kept session. Never opens the login page for a
+        kept session: on the real site the home page is Login.aspx, and opening it there looks
+        logged out (and may end the session). The first page opened with _open() signs in
+        again if the site has dropped the session meanwhile."""
+        if self.context is None:
+            await self.login()
+
+    async def home(self) -> Page:
+        """A light page that shows the profile (name, credit), signing in if needed."""
+        await self.ensure_login()
+        return await self._open(SALE_PATH)
+
     async def login(self) -> None:
         started = time.monotonic()
         self.step("اتصال به سلف…")

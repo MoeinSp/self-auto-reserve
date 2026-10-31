@@ -249,30 +249,38 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
     async def test_kept_session_skips_the_login(self):
         from app.worker import Worker
 
+        sale = "FoodBasket/FoodBasketSale.aspx"
         w = Worker()
         w.browser = self.browser
         first = self.client()
         steps = []
         first.step = steps.append
-        self.assertFalse(w._lend_session(9, first))
-        await first.login()
+        await w._lend_session(9, first)
+        await first.ensure_login()  # a new session: the first page signs in
+        await first._open(sale)
         self.assertIn("در حال ورود به سلف…", steps)
-        await w._return_session(9, first, True, False)
+        await w._return_session(9, first)
         self.assertIn(9, w.sessions)
         logins = len(self.throttle._logins)
 
-        second = self.client()
+        second, third = self.client(), self.client()
+        await w._lend_session(9, second)
+        await w._lend_session(9, third)  # a basket job at the same time shares it too
+        self.assertIs(second.context, first.context)
+        self.assertIs(third.context, first.context)
         steps.clear()
         second.step = steps.append
-        self.assertTrue(w._lend_session(9, second))
-        await second.login()  # one page load, no captcha
-        page = await second._open(fake_site_path := "FoodBasket/FoodBasketSale.aspx")
-        self.assertIn(fake_site_path, page.url)
-        self.assertEqual(len(self.throttle._logins), logins)
-        self.assertIn("از قبل وارد سلف هستی ✓", steps)
+        await second.ensure_login()  # no request at all
+        page = await second._open(sale)
+        self.assertIn(sale, page.url)
         self.assertEqual((await second.read_profile())["name"], "معین فیروزآبادی")
-        # A failed run doesn't keep the session.
-        await w._return_session(9, second, False, True)
+        self.assertEqual(len(self.throttle._logins), logins)
+        self.assertNotIn("در حال ورود به سلف…", steps)
+        # A failed login drops the session, but the tab still using it keeps working until it ends.
+        await w._return_session(9, second, keep=False)
+        self.assertNotIn(9, w.sessions)
+        self.assertIn(sale, (await third._open(sale)).url)
+        await w._return_session(9, third)
         self.assertNotIn(9, w.sessions)
 
     async def test_week_choices_reserve_change_and_cancel_together(self):
