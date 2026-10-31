@@ -99,6 +99,16 @@ CREATE TABLE IF NOT EXISTS basket_sales (
     checked_at REAL NOT NULL,
     PRIMARY KEY (account_id, date, meal)
 );
+-- Meals the bot bought from the food basket. The reservation page doesn't show them
+-- (the row stays unticked), so the panel keeps them and adds them to the reservations.
+CREATE TABLE IF NOT EXISTS basket_buys (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    meal TEXT NOT NULL,
+    food TEXT NOT NULL,
+    bought_at REAL NOT NULL,
+    PRIMARY KEY (account_id, date, meal)
+);
 -- Admin-editable runtime settings (rate limits), see app/limits.py.
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -373,6 +383,12 @@ def save_reservations(account_id: int, week: dict[str, dict[str, str]],
             [(account_id, day, json.dumps(meals, ensure_ascii=False), now, json.dumps(locked.get(day, []), ensure_ascii=False))
              for day, meals in week.items()],
         )
+        # The site shows a sold meal as not reserved: a reservation there now is a new one
+        # (e.g. bought back from the basket), so the old "sold" record must not hide it.
+        c.executemany(
+            "DELETE FROM basket_sales WHERE account_id = ? AND date = ? AND meal = ? AND status = 'sold'",
+            [(account_id, day, meal) for day, meals in week.items() for meal, food in meals.items() if food],
+        )
         c.execute("UPDATE accounts SET reservations_at = ? WHERE id = ?", (now, account_id))
 
 
@@ -389,6 +405,9 @@ def reservations(account_id: int, from_date: str) -> dict[str, dict[str, str]]:
         meals = {m: f for m, f in json.loads(r["data"]).items() if f and (r["date"], m) not in sold}
         if meals:
             out[r["date"]] = meals
+    for day, meals in basket_buys(account_id, from_date).items():
+        for meal, food in meals.items():
+            out.setdefault(day, {}).setdefault(meal, food)
     return out
 
 
@@ -428,3 +447,26 @@ def reservation_locks(account_id: int, from_date: str) -> dict[str, list[str]]:
             "SELECT date, locked FROM reservations WHERE account_id = ? AND date >= ?", (account_id, from_date)
         ).fetchall()
     return {r["date"]: json.loads(r["locked"] or "[]") for r in rows}
+
+
+def save_basket_buy(account_id: int, date: str, meal: str, food: str) -> None:
+    """A meal bought from the basket; it replaces an old "sold" record of the same meal."""
+    with tx() as c:
+        c.execute(
+            "INSERT INTO basket_buys (account_id, date, meal, food, bought_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(account_id, date, meal) DO UPDATE SET food = excluded.food, bought_at = excluded.bought_at",
+            (account_id, date, meal, food, time.time()),
+        )
+        c.execute("DELETE FROM basket_sales WHERE account_id = ? AND date = ? AND meal = ?", (account_id, date, meal))
+
+
+def basket_buys(account_id: int, from_date: str) -> dict[str, dict[str, str]]:
+    """Meals bought from the basket from `from_date` on: {date: {meal: food}}."""
+    with tx() as c:
+        rows = c.execute(
+            "SELECT date, meal, food FROM basket_buys WHERE account_id = ? AND date >= ?", (account_id, from_date)
+        ).fetchall()
+    out: dict[str, dict[str, str]] = {}
+    for r in rows:
+        out.setdefault(r["date"], {})[r["meal"]] = r["food"]
+    return out

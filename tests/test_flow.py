@@ -80,6 +80,7 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         await c.close()
         self.assertEqual(result.status, "bought", result.message)
         self.assertEqual(fake_site.PURCHASES, [("1405/08/05", "ناهار", "جوجه كباب", 1)])
+        self.assertEqual((result.meal, result.food), ("ناهار", "جوجه کباب"))  # Persian ک
 
     async def test_waits_when_nothing_wanted(self):
         fake_site.STOCK["1405/08/05"] = {"ناهار": {"خوراک مرغ": 2}}
@@ -859,6 +860,20 @@ class UnitTest(unittest.TestCase):
         self.assertEqual(db.reservations(aid, today), {})
         body = asyncio.run(web.dashboard(Request({**req(session).scope, "method": "GET"}))).body.decode()
         self.assertIn("به سبد فروخته شد: قیمه", body)
+        # Bought again later (e.g. from the basket): the site's reservation wins over the old sale.
+        db.save_reservations(aid, {today: {"ناهار": "ماکارونی,ترشی"}})
+        self.assertEqual(db.reservations(aid, today), {today: {"ناهار": "ماکارونی,ترشی"}})
+        self.assertEqual(db.sales(aid, today), {})
+        # A basket buy isn't on the reservation page (the row stays unticked): the panel's record of it
+        # counts as a reservation, and replaces an old "sold" record of the same meal.
+        Worker._record_sale(aid, today, "شام", {"state": "gone", "status": "", "food": "کشک", "price": ""})
+        db.save_basket_buy(aid, today, "شام", "ماکارونی,ترشی")
+        db.save_reservations(aid, {today: {"صبحانه": "", "ناهار": "ماکارونی,ترشی", "شام": ""}})
+        self.assertEqual(db.reservations(aid, today)[today]["شام"], "ماکارونی,ترشی")
+        self.assertNotIn("شام", db.sales(aid, today).get(today, {}))
+        with db.tx() as c:
+            c.execute("DELETE FROM basket_buys WHERE account_id = ?", (aid,))
+        db.save_reservations(aid, {today: {"ناهار": "قیمه"}})
         self.assertIn('value="ناهار|قیمه">', body)
         Worker._record_sale(aid, today, "ناهار", {"state": "reserved", "status": "", "food": "", "price": ""})
         self.assertEqual(db.sales(aid, today), {})

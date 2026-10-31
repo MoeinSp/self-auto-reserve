@@ -289,6 +289,7 @@ async def dashboard(request: Request):  # async: it may start a background op
     reserved_all = db.reservations(active_account["id"], res_days[0]["date"]) if has_acc else {}
     sales = db.sales(active_account["id"], res_days[0]["date"]) if has_acc else {}
     locks = db.reservation_locks(active_account["id"], res_days[0]["date"]) if has_acc else {}
+    basket_bought = db.basket_buys(active_account["id"], res_days[0]["date"]) if has_acc else {}
     # Read the account's reservations right after its first successful login, once.
     if has_acc and not active_account["reservations_at"] and active_account["login_state"] == "ok" and not worker.busy(uid):
         worker.check_reservations(uid, active_account["id"])
@@ -302,7 +303,7 @@ async def dashboard(request: Request):  # async: it may start a background op
         min_job_interval=config.MIN_JOB_INTERVAL, statuses=statuses,
         op=worker.ops.get(uid), now=time.time(),
         week_menu=db.week_menu(jalali.today_str()), menu_at=menu_at,
-        res_days=res_days, reserved_all=reserved_all, all_menu=all_menu, sales=sales, locks=locks, NO_RESERVE=NO_RESERVE,
+        res_days=res_days, reserved_all=reserved_all, all_menu=all_menu, sales=sales, locks=locks, basket_bought=basket_bought, NO_RESERVE=NO_RESERVE,
         reserved={d: m for d, m in reserved_all.items() if d >= jalali.today_str()},
         known_foods=_known_foods(all_menu),
         menu_refreshing=worker.menu_refreshing,

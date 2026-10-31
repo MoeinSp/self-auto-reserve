@@ -745,6 +745,8 @@ class Worker:
         seen = "، ".join(result.seen) if result.seen else "-"
         prefix = f"[{account_name}] " if account_name else ""
         if result.status == "bought":
+            if result.meal and result.food:  # the reservation page won't show it
+                db.save_basket_buy(row["account_id"], row["date"], result.meal, result.food)
             n = db.count_attempt(row["id"], result.message)
             msg = f"{prefix}{result.message} (در تلاش {n})"
             db.set_job_status(row["id"], "done", msg)

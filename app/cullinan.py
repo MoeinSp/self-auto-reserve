@@ -95,6 +95,8 @@ class Attempt:
     status: str  # empty | no_match | bought | error
     message: str
     seen: list[str] = field(default_factory=list)
+    meal: str = ""  # bought: the meal (صبحانه / ناهار / شام) and the food
+    food: str = ""
 
 
 # Reads the rows of a reservation grid into plain data. Both pages use the same
@@ -552,7 +554,8 @@ class CullinanClient:
         message = norm(" ".join(self.dialogs) + " " + await self._text(page, SEL["page_message"]))
         if any(h in message.lower() for h in ERROR_HINTS):
             return Attempt("error", f"خرید «{name}» ناموفق: {message}", seen)
-        return Attempt("bought", f"«{name}» ({rows[index]['label']}) خریداری شد. {message}".strip(), seen)
+        meal = next((m for m in WEEK_GRIDS if m in norm(rows[index]["label"])), job.meal)
+        return Attempt("bought", f"«{name}» ({rows[index]['label']}) خریداری شد. {message}".strip(), seen, meal, name)
 
     # ---------------------------------------------------------- basket sale
     async def _visible(self, page: Page, selector: str) -> bool:
