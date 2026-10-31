@@ -10,7 +10,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
 
 from . import captcha, config, db, jalali, security
-from .cullinan import WEEK_GRIDS, Attempt, CullinanClient, Job, LoginFailed, SiteError, launch_browser
+from .cullinan import RESERVATION_PATH, WEEK_GRIDS, Attempt, CullinanClient, Job, LoginFailed, SiteError, launch_browser
 from .ratelimit import RateLimited, Throttle
 from .text import parse_foods
 
@@ -36,6 +36,7 @@ PRIORITY_COLUMNS = {"صبحانه": "priority_breakfast", "ناهار": "priorit
 AUTO_RESERVE_RETRY = 3600  # seconds before a failed scheduled auto-reserve is tried again
 WEEK_MENU_AUTO_KEY = "week_menu_auto"  # settings key: date of the last scheduled week-menu refresh
 CREDIT_LATER_KEY = "credit_later"  # settings key: JSON {account id: [due times]} of scheduled credit reads
+SESSION_IDLE = 15 * 60  # seconds a kept site session is reused after its last run
 CREDIT_LATER = (3600, 12 * 3600)  # after a meal goes in the basket: its sale (and the credit) comes later
 
 
@@ -88,6 +89,7 @@ class Worker:
         self.login_throttles: dict[str, Throttle] = {}  # student number -> Throttle, for sign-in with site account
         self.auto_reserve_tried: dict[int, float] = {}  # account id -> time of the last scheduled auto-reserve
         self.credit_reading: set[int] = set()  # accounts with a scheduled credit read running
+        self.sessions: dict[int, tuple] = {}  # account id -> (logged-in BrowserContext, last use), see _lend_session
         self._pw = None
         self.browser = None
 
@@ -123,6 +125,7 @@ class Worker:
 
                 self._auto_refresh_week_menu()
                 self._due_credit_reads()
+                self._drop_idle_sessions()
 
                 # Check weekly auto-reserve on Wednesdays
                 today_str = jalali.today_str()
@@ -212,6 +215,44 @@ class Worker:
             throttle.lane() if own_lane else throttle, solve,
         )
 
+    # ---------------------------------------------------- kept site sessions
+    # On-demand runs reuse the account's logged-in browser context, so they skip the
+    # login (and its captcha): one page load instead of 10-45 s. The site drops idle
+    # sessions after a while; then login() just signs in again.
+    def _lend_session(self, account_id: int, client: CullinanClient) -> bool:
+        client.keep_context = True
+        kept = self.sessions.pop(account_id, None)
+        if kept and time.time() - kept[1] < SESSION_IDLE:
+            client.context = kept[0]
+            return True
+        if kept:
+            asyncio.get_running_loop().create_task(self._close_context(kept[0]))
+        return False
+
+    async def _return_session(self, account_id: int, client: CullinanClient, keep: bool, reused: bool) -> None:
+        await client.close()  # the page only
+        context = client.context
+        if context is None:
+            return
+        if keep and account_id not in self.sessions:
+            self.sessions[account_id] = (context, time.time())
+        else:
+            await self._close_context(context)
+
+    @staticmethod
+    async def _close_context(context) -> None:
+        try:
+            await context.close()
+        except Exception:
+            pass
+
+    def _drop_idle_sessions(self) -> None:
+        now = time.time()
+        for aid, (context, used) in list(self.sessions.items()):
+            if now - used >= SESSION_IDLE:
+                del self.sessions[aid]
+                asyncio.get_running_loop().create_task(self._close_context(context))
+
     def busy(self, user_id: int) -> bool:
         op = self.ops.get(user_id)
         return bool(op and op["state"] == "running")
@@ -228,24 +269,34 @@ class Worker:
             "account_id": account_id,
         }
 
+        op["steps"] = []
+
+        def step(text: str) -> None:
+            op["steps"] = (op["steps"] + [text])[-8:]
+
         async def go():
             client = self.client_for(account_id, own_lane=True)
             client.interactive = True
+            client.step = step
+            reused = self._lend_session(account_id, client)
+            keep = False
             try:
                 op["message"] = await asyncio.wait_for(run(client), OP_TIMEOUT)
                 op["state"] = "ok"
+                keep = True
                 db.set_login_state(account_id, True)
                 db.log(user_id, f"{title}: {op['message']}", "success")
             except Exception as exc:
                 if not isinstance(exc, (LoginFailed, RateLimited, SiteError, asyncio.TimeoutError)):
                     log.exception("%s failed for user %s (account %s)", title, user_id, account_id)
                 op["state"], op["message"] = "error", _explain(exc)
+                keep = isinstance(exc, SiteError)  # the session itself is still fine
                 if isinstance(exc, LoginFailed):
                     db.set_login_state(account_id, False, op["message"])
                 db.log(user_id, f"{title} ناموفق: {op['message']}", "error")
             finally:
                 op["finished"] = time.time()
-                await client.close()
+                await self._return_session(account_id, client, keep, reused)
 
         try:
             asyncio.get_running_loop().create_task(go())
@@ -397,7 +448,7 @@ class Worker:
         db.save_week_menu(week)
         db.save_reservations(account_id, {
             day: {meal: info["reserved"] for meal, info in meals.items()} for day, meals in found.items()
-        })
+        }, {day: [meal for meal, info in meals.items() if info["locked"]] for day, meals in found.items()})
         return week
 
     def check_reservations(self, user_id: int, account_id: int) -> bool:
@@ -423,6 +474,8 @@ class Worker:
         reservation page just opened (fresh, no extra request). Returns a note for the user."""
         notes = []
         try:
+            client.step("به‌روزرسانی جدول رزروها و موجودی…")
+            await client._open(RESERVATION_PATH)  # a fresh load: shows the credit after the change
             await self._sync_weeks(client, account_id)
             notes.append("جدول رزروها به‌روز شد")
         except Exception as exc:
@@ -509,6 +562,20 @@ class Worker:
             return " · ".join(done + failed)
 
         return self.start_op(user_id, "فروش به سبد غذایی", run, account_id=account_id)
+
+    def save_week_choices(self, user_id: int, account_id: int, changes: dict[str, dict[str, str]]) -> bool:
+        """Reserve / change / cancel weekly reservations chosen in the panel, then refresh the table and credit."""
+        async def run(client: CullinanClient) -> str:
+            results = await client.save_week_choices(changes)
+            after = await self._after_change(client, account_id)
+            ok = sum(r.startswith("★") for r in results)
+            head = f"{ok} مورد ثبت شد" if ok else "چیزی ثبت نشد"
+            text = " · ".join([head] + results + ([after] if after else []))
+            if not ok and any(r.startswith("✗") for r in results):
+                raise SiteError(text)
+            return text
+
+        return self.start_op(user_id, "ثبت رزرو هفتگی", run, account_id=account_id)
 
     def check_sale(self, user_id: int, account_id: int, date: str, meal: str) -> bool:
         """Look once whether a meal waiting in the basket has been sold. Only on demand: never polled."""

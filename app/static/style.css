@@ -630,3 +630,20 @@ details.fold > form, details.fold > div { padding: 0 16px 16px; }
 .res-cell.basket .i, .res-cell.sold .i { width: 14px; height: 14px; flex: none; }
 .res-key.basket { background: var(--warn-soft); color: var(--warn); }
 .res-key.basket .i { width: 12px; height: 12px; }
+
+/* Live steps of a running operation */
+.op-steps { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
+.op-steps li { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.op-steps li.now { color: var(--text); font-weight: 600; }
+.op-steps li .i { width: 14px; height: 14px; flex: none; color: var(--ok); }
+.spinner.sm { width: 14px; height: 14px; border-width: 2px; flex: none; }
+
+/* Weekly reservation form (like the site's reservation page) */
+.week-pick .meal.reserved-meal .pick { opacity: 1; }
+.week-pick fieldset:disabled .pick { opacity: .5; }
+.wp-day { border: 1px solid var(--line); border-radius: 12px; padding: 0 12px; }
+.wp-day[open] { padding-bottom: 12px; }
+.wp-day summary { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; list-style: none; }
+.wp-day summary::-webkit-details-marker { display: none; }
+.wp-sum { margin-inline-start: auto; display: flex; gap: 4px; }
+.pick.none-pick { color: var(--muted); }

@@ -288,6 +288,7 @@ async def dashboard(request: Request):  # async: it may start a background op
     res_days = jalali.two_weeks_days()
     reserved_all = db.reservations(active_account["id"], res_days[0]["date"]) if has_acc else {}
     sales = db.sales(active_account["id"], res_days[0]["date"]) if has_acc else {}
+    locks = db.reservation_locks(active_account["id"], res_days[0]["date"]) if has_acc else {}
     # Read the account's reservations right after its first successful login, once.
     if has_acc and not active_account["reservations_at"] and active_account["login_state"] == "ok" and not worker.busy(uid):
         worker.check_reservations(uid, active_account["id"])
@@ -301,7 +302,7 @@ async def dashboard(request: Request):  # async: it may start a background op
         min_job_interval=config.MIN_JOB_INTERVAL, statuses=statuses,
         op=worker.ops.get(uid), now=time.time(),
         week_menu=db.week_menu(jalali.today_str()), menu_at=menu_at,
-        res_days=res_days, reserved_all=reserved_all, all_menu=all_menu, sales=sales,
+        res_days=res_days, reserved_all=reserved_all, all_menu=all_menu, sales=sales, locks=locks, NO_RESERVE=NO_RESERVE,
         reserved={d: m for d, m in reserved_all.items() if d >= jalali.today_str()},
         known_foods=_known_foods(all_menu),
         menu_refreshing=worker.menu_refreshing,
@@ -840,6 +841,52 @@ async def sell_to_basket(  # async: it starts a background op
     if not worker.sell_to_basket(uid, account_id, day, meals):
         return _back(f"/?account={account_id}#buy", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
     return _back(f"/?account={account_id}#buy")
+
+
+NO_RESERVE = "-"  # the «رزرو نکن» choice of a meal in the weekly reservation form
+
+
+def _week_changes(account_id: int, form) -> dict[str, dict[str, str]]:
+    """Choices of the weekly reservation form ("pick:<date>:<meal>" = food or NO_RESERVE) that
+    differ from the current reservations: {date: {meal: food, or "" to cancel}}. Past days,
+    locked meals, meals waiting in the basket and foods not on that day's menu are left out."""
+    today = jalali.today_str()
+    have = db.reservations(account_id, today)
+    locks = db.reservation_locks(account_id, today)
+    listed = db.sales(account_id, today)
+    menu = db.week_menu(today)
+    changes: dict[str, dict[str, str]] = {}
+    for key, value in form.multi_items():
+        name, _, rest = key.partition(":")
+        day, _, meal = rest.partition(":")
+        if name != "pick" or meal not in MEALS or not meal or day < today or day not in menu:
+            continue
+        if meal in locks.get(day, []) or meal in listed.get(day, {}):
+            continue
+        current = have.get(day, {}).get(meal, "")
+        if value == NO_RESERVE:
+            if current:
+                changes.setdefault(day, {})[meal] = ""
+        elif value in menu[day].get(meal, []) and value != current:
+            changes.setdefault(day, {})[meal] = value
+    return changes
+
+
+@app.post("/reserve-week")
+async def reserve_week(request: Request):  # async: it starts a background op
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    form = await request.form()
+    account_id = _own_account(uid, form.get("account_id", 0))
+    if not account_id:
+        return _back("/", "حساب پیدا نشد.", request)
+    changes = _week_changes(account_id, form)
+    if not changes:
+        return _back(f"/?account={account_id}#reserves", "تغییری انتخاب نکردی.", request)
+    if not worker.save_week_choices(uid, account_id, changes):
+        return _back(f"/?account={account_id}#reserves", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+    return _back(f"/?account={account_id}#reserves")
 
 
 SALE_CHECK_GAP = 60  # seconds between two checks of one sale; checks are manual only

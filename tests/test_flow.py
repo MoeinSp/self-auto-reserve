@@ -52,6 +52,7 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         fake_site.MENU.clear()
         fake_site.WEEK_SAVES.clear()
         fake_site.SALES.clear()
+        fake_site.WEEK_CANCELS.clear()
         fake_site.state.pop("credit_days", None)
         self.pw = await async_playwright().start()
         self.browser = await launch_browser(self.pw)
@@ -245,6 +246,63 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("3,345,000", conn.execute("SELECT credit FROM accounts WHERE id = ?", (aid,)).fetchone()["credit"])
         self.assertEqual(db.reservations(aid, today).get(today), {"ناهار": "قیمه"})
 
+    async def test_kept_session_skips_the_login(self):
+        from app.worker import Worker
+
+        w = Worker()
+        w.browser = self.browser
+        first = self.client()
+        steps = []
+        first.step = steps.append
+        self.assertFalse(w._lend_session(9, first))
+        await first.login()
+        self.assertIn("در حال ورود به سلف…", steps)
+        await w._return_session(9, first, True, False)
+        self.assertIn(9, w.sessions)
+        logins = len(self.throttle._logins)
+
+        second = self.client()
+        steps.clear()
+        second.step = steps.append
+        self.assertTrue(w._lend_session(9, second))
+        await second.login()  # one page load, no captcha
+        page = await second._open(fake_site_path := "FoodBasket/FoodBasketSale.aspx")
+        self.assertIn(fake_site_path, page.url)
+        self.assertEqual(len(self.throttle._logins), logins)
+        self.assertIn("از قبل وارد سلف هستی ✓", steps)
+        self.assertEqual((await second.read_profile())["name"], "معین فیروزآبادی")
+        # A failed run doesn't keep the session.
+        await w._return_session(9, second, False, True)
+        self.assertNotIn(9, w.sessions)
+
+    async def test_week_choices_reserve_change_and_cancel_together(self):
+        fake_site.MENU.update({
+            "1405/08/10": {"ناهار": {"foods": ["قیمه", "کباب"]}, "شام": {"foods": ["کوکو"], "reserved": "کوکو"}},
+            "1405/08/11": {"ناهار": {"foods": ["جوجه", "عدس پلو"], "reserved": "جوجه"}},
+            "1405/08/12": {"ناهار": {"foods": ["ماکارونی"], "reserved": "ماکارونی", "locked": True}},
+            "1405/08/03": {"شام": {"foods": ["سوپ"]}},
+        })
+        c = self.client()
+        results = await c.save_week_choices({
+            "1405/08/10": {"ناهار": "کباب", "شام": ""},  # new + cancel
+            "1405/08/11": {"ناهار": "عدس پلو"},  # change
+            "1405/08/12": {"ناهار": ""},  # locked
+            "1405/08/03": {"شام": "سوپ"},  # the week before
+        })
+        await c.close()
+        self.assertIn("★ 1405/08/10 (ناهار): «کباب» رزرو شد", results)
+        self.assertIn("★ 1405/08/10 (شام): رزرو لغو شد", results)
+        self.assertIn("★ 1405/08/11 (ناهار): «عدس پلو» رزرو شد", results)
+        self.assertIn("★ 1405/08/03 (شام): «سوپ» رزرو شد", results)
+        self.assertTrue(any(r.startswith("✗ 1405/08/12") and "قفل" in r for r in results), results)
+        menu = fake_site.MENU
+        self.assertEqual((menu["1405/08/10"]["ناهار"]["reserved"], menu["1405/08/10"]["شام"]["reserved"]), ("کباب", None))
+        self.assertEqual(menu["1405/08/11"]["ناهار"]["reserved"], "عدس پلو")
+        self.assertEqual(menu["1405/08/12"]["ناهار"]["reserved"], "ماکارونی")
+        self.assertEqual(fake_site.WEEK_CANCELS, [("1405/08/10", "شام")])
+        # One save per meal and week: lunch of the 10th and 11th went in one press.
+        self.assertEqual(sorted(fake_site.WEEK_SAVES), [("1405/08/03", "شام"), ("1405/08/10", "ناهار"), ("1405/08/11", "ناهار")])
+
     async def test_auto_reserve_opens_hidden_meal_tabs(self):
         # Only the lunch tab is open on the real page; dinner sits in a hidden tab.
         fake_site.MENU["1405/08/09"] = {"ناهار": {"foods": ["قیمه"], "reserved": "قیمه"}, "شام": {"foods": ["ماکارونی", "کتلت"]}}
@@ -302,7 +360,7 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
                 mock.patch.object(jalali, "get_next_week_days", return_value=[{"date": "1405/08/09"}]):
             self.assertTrue(w.refresh_week_menu(1, 1))
             self.assertFalse(w.refresh_week_menu(1, 1))  # one at a time
-            while "finished" not in w.ops[1] or c.context:
+            while "finished" not in w.ops[1] or c.page:  # the context itself is kept (w.sessions)
                 await asyncio.sleep(0.05)
         self.assertEqual(w.ops[1]["state"], "ok", w.ops[1]["message"])
         self.assertFalse(w.menu_refreshing)
@@ -831,6 +889,32 @@ class UnitTest(unittest.TestCase):
         self.assertEqual(started, [7])  # once, and the 12 h read is still planned
         self.assertEqual(len(json.loads(db.get_setting(wmod.CREDIT_LATER_KEY))["7"]), 1)
         db.set_setting(wmod.CREDIT_LATER_KEY, "{}")
+
+    def test_week_form_sends_only_real_changes(self):
+        from starlette.datastructures import FormData
+
+        from app import jalali, web
+
+        days = [d["date"] for d in jalali.two_weeks_days() if not d["is_past"]][:3]
+        with db.tx() as c:
+            c.execute("INSERT OR IGNORE INTO users (id, username, password_hash, created_at) VALUES (1, 'u', 'x$y', 0)")
+            aid = c.execute("INSERT INTO accounts (user_id, site_username, site_password_enc) VALUES (1, 'wk', 'e')").lastrowid
+        db.save_week_menu({d: {"صبحانه": [], "ناهار": ["قیمه", "کباب"], "شام": ["کوکو"]} for d in days})
+        db.save_reservations(aid, {days[0]: {"ناهار": "قیمه", "شام": "کوکو"}, days[1]: {"ناهار": "قیمه"}},
+                             {days[1]: ["ناهار"]})
+        form = FormData([
+            (f"pick:{days[0]}:ناهار", "کباب"),  # change
+            (f"pick:{days[0]}:شام", web.NO_RESERVE),  # cancel
+            (f"pick:{days[1]}:ناهار", web.NO_RESERVE),  # locked: ignored
+            (f"pick:{days[2]}:ناهار", "قیمه"),  # new
+            (f"pick:{days[2]}:شام", web.NO_RESERVE),  # nothing to cancel
+            (f"pick:{days[2]}:صبحانه", "پیتزا"),  # not on the menu
+            (f"pick:1300/01/01:ناهار", "قیمه"),  # past
+        ])
+        self.assertEqual(web._week_changes(aid, form), {
+            days[0]: {"ناهار": "کباب", "شام": ""}, days[2]: {"ناهار": "قیمه"},
+        })
+        self.assertEqual(db.reservation_locks(aid, days[0])[days[1]], ["ناهار"])
 
     def test_payments_are_off(self):
         from starlette.requests import Request

@@ -150,6 +150,7 @@ WEEKS = [
 MENU: dict[str, dict[str, dict]] = {}
 HIDE_GRIDS: set[str] = set()  # grid suffixes left out of the page, e.g. {"Lunch"}
 WEEK_SAVES: list[tuple[str, str]] = []  # (date, meal) reserved with a weekly save button
+WEEK_CANCELS: list[tuple[str, str]] = []  # (date, meal) unticked and saved
 
 
 @app.api_route("/Reservation/Reservation.aspx", methods=["GET", "POST"])
@@ -169,11 +170,19 @@ async def reservation(request: Request):
                 info = MENU.get(day, {}).get(meal)
                 if state.get("credit_days") is not None and state["credit_days"] <= 0:
                     break  # out of credit: the real site saves only the days it can pay for
-                if f.get(f"{suffix}chk{i}") and info and info.get("foods") and not info.get("reserved"):
+                if info and info.get("reserved") and not info.get("locked") and not f.get(f"{suffix}chk{i}"):
+                    info["reserved"] = None  # unticked: the reservation is cancelled
+                    WEEK_CANCELS.append((day, meal))
+                    continue
+                if f.get(f"{suffix}chk{i}") and info and info.get("foods"):
                     picked = f.get(f"{suffix}food{i}", "1")  # option values are 1..n
-                    info["reserved"] = info["foods"][int(picked) - 1 if picked.isdigit() and 0 < int(picked) <= len(info["foods"]) else 0]
+                    food = info["foods"][int(picked) - 1 if picked.isdigit() and 0 < int(picked) <= len(info["foods"]) else 0]
+                    if info.get("reserved") == food:
+                        continue
+                    was = info.get("reserved")
+                    info["reserved"] = food  # new, or another food for the same day
                     WEEK_SAVES.append((day, meal))
-                    if state.get("credit_days") is not None:
+                    if state.get("credit_days") is not None and not was:
                         state["credit_days"] -= 1
     # Like the real page: a CSS tab strip, one meal per tab, lunch open by default.
     grids = '<style>.css3-tabstrip > div { display: none } .css3-tabstrip > input:checked + label + div { display: block }</style><div class="css3-tabstrip">'

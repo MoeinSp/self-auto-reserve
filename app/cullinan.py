@@ -59,6 +59,8 @@ SALE_SEL = {
     "cancel": "#cphMain_btnCancel, [id$='btnCancel']",  # «حذف از سبد غذا», shown while waiting in the basket
 }
 SALE_MEALS = {"صبحانه": "1", "ناهار": "2", "شام": "3"}
+PAGE_LABELS = {RESERVATION_PATH: "رزرو هفتگی", SALE_PATH: "فروش به سبد", config.BASKET_PATH: "سبد غذایی",
+               "Reservation/ForgotReceipt.aspx": "فیش فراموشی", "ePay/ePay_Payment.aspx": "پرداخت"}
 WEEK_GRIDS = {"صبحانه": "Breakfast", "ناهار": "Lunch", "شام": "Dinner"}
 
 # Dropdown entries that mean "nothing selected".
@@ -201,13 +203,26 @@ class CullinanClient:
         self.poll_interval: float | None = None  # per-job polling interval (seconds), None = default
         self.captcha_attempts = 0  # of the last successful login, for the login test report
         self.display_name = ""  # real name from site portal profile
+        # A browser context (cookies = the site session) kept by the worker between runs:
+        # close() then leaves it open, and the next run skips the login while it's valid.
+        self.keep_context = False
+        self.step: Callable[[str], None] = lambda text: None  # live progress for the panel
+
+    async def _new_context(self) -> BrowserContext:
+        context = await self.browser.new_context(locale="fa-IR", viewport={"width": 1366, "height": 900})
+        await context.route("**/*", self._route)
+        self._watch_slow_requests(context)
+        return context
 
     async def _page(self) -> Page:
         if self.page is None or self.page.is_closed():
-            self.context = await self.browser.new_context(locale="fa-IR", viewport={"width": 1366, "height": 900})
-            await self.context.route("**/*", self._route)
-            self._watch_slow_requests(self.context)
-            self.page = await self.context.new_page()
+            if self.context is None:
+                self.context = await self._new_context()
+            try:
+                self.page = await self.context.new_page()
+            except Exception:  # the kept context is gone (browser restarted)
+                self.context = await self._new_context()
+                self.page = await self.context.new_page()
             self.page.set_default_timeout(15_000)
             self.page.set_default_navigation_timeout(30_000)
             self.page.on("dialog", self._on_dialog)
@@ -242,6 +257,11 @@ class CullinanClient:
         await dialog.accept()
 
     async def close(self) -> None:
+        if self.keep_context:
+            if self.page and not self.page.is_closed():
+                await self.page.close()
+            self.page = None
+            return
         if self.context:
             await self.context.close()
         self.context = self.page = None
@@ -356,17 +376,21 @@ class CullinanClient:
 
     # ---------------------------------------------------------------- login
     async def login(self) -> None:
-        self.throttle.login_attempt()
         started = time.monotonic()
+        self.step("اتصال به سلف…")
         page = await self._goto(config.SITE_URL)
         log.info("login page loaded in %.1fs", time.monotonic() - started)
         if not await self._on_login_page(page):
+            self.step("از قبل وارد سلف هستی ✓")
             return
+        self.throttle.login_attempt()  # counts real sign-ins only, not a still-valid session
+        self.step("در حال ورود به سلف…")
         for attempt in range(1, config.CAPTCHA_OCR_TRIES + 2):
             await self._fill(page, SEL["username"], self.username)
             await self._fill(page, SEL["password"], self.password)
             png = await page.locator(SEL["captcha_img"]).first.screenshot()
             t = time.monotonic()
+            self.step("خواندن کپچا…" if attempt == 1 else f"خواندن کپچا (تلاش {attempt})…")
             code = await self.solve_captcha(png, attempt)
             log.info("captcha attempt %d: %s in %.1fs", attempt, "read" if code else "unreadable", time.monotonic() - t)
             if not code:
@@ -377,11 +401,13 @@ class CullinanClient:
             await self._fill(page, SEL["captcha_input"], code)
             await self.throttle.wait(step=True)
             t = time.monotonic()
+            self.step("ارسال فرم ورود…")
             await self._postback(page, page.locator(SEL["login_button"]).first.click)
             log.info("login postback took %.1fs", time.monotonic() - t)
             if not await self._on_login_page(page):
                 self.captcha_attempts = attempt
                 log.info("logged in as %s in %.1fs (captcha attempt %d)", self.username, time.monotonic() - started, attempt)
+                self.step(f"وارد سلف شدی ✓ ({time.monotonic() - started:.0f} ثانیه)")
                 await self.read_profile()
                 return
             error = norm(await self._text(page, SEL["login_error"]) + " " + " ".join(self.dialogs[-1:]))
@@ -401,8 +427,11 @@ class CullinanClient:
     async def _open(self, path: str) -> Page:
         """Open a page of the site, logging in first if the session is gone."""
         url = urljoin(config.SITE_URL, path)
+        if label := PAGE_LABELS.get(path):
+            self.step(f"باز کردن صفحهٔ {label}…")
         page = await self._goto(url)
         if await self._on_login_page(page) or "login" in page.url.lower():
+            self.step("نشست سلف تمام شده بود")
             await self.login()
             page = await self._goto(url, step=True)
             if await self._on_login_page(page):
@@ -524,6 +553,7 @@ class CullinanClient:
         await page.locator(SALE_SEL["date"]).first.evaluate("(el, v) => { el.value = v; }", date)
         await page.select_option(SALE_SEL["type"], "0")  # رزرو هفتگی
         await page.select_option(SALE_SEL["meal"], SALE_MEALS[meal])
+        self.step(f"بارگذاری {meal} {date}…")
         await self.throttle.wait(step=True)
         await self._postback(page, page.locator(SALE_SEL["load"]).first.click)
         state = ("reserved" if await self._visible(page, SALE_SEL["sell"])
@@ -556,6 +586,7 @@ class CullinanClient:
             return info  # already waiting in the basket
         if info["state"] != "reserved":
             raise SiteError(f"{meal} {date} قابل فروش نیست{': ' + info['status'] if info['status'] else ''}")
+        self.step(f"گذاشتن «{info['food'] or meal}» در سبد…")
         await self.throttle.wait(step=True)
         await self._postback(page, page.locator(SALE_SEL["sell"]).first.click)
         message = norm(" ".join(self.dialogs[-1:]) + " " + await self._text(page, SEL["page_message"]))
@@ -578,27 +609,35 @@ class CullinanClient:
         return after
 
     # ---------------------------------------------------- weekly reservation
-    async def read_week(self, date: str) -> dict[str, dict[str, dict]]:
-        """Menu and own reservations of the week containing `date`, from the reservation page.
-
-        Returns {date: {meal: {"foods": [...], "reserved": food or "", "locked": bool}}}.
-        Read-only: the page is only navigated (week arrows), never saved.
-        """
-        page = await self._open(RESERVATION_PATH)
+    async def _week_page(self, date: str) -> Page:
+        """The reservation page showing the week of `date`. The page already open is reused
+        (no reload), and the week arrows are pressed as needed."""
+        page = self.page
+        if not (page and not page.is_closed() and RESERVATION_PATH.lower() in page.url.lower()):
+            page = await self._open(RESERVATION_PATH)
         for _ in range(4):
             label = norm(await self._text(page, SEL["week_label"]))
             days = DATE_RE.findall(label)
             if len(days) < 2:
                 raise SiteError("بازهٔ هفته در صفحهٔ رزرو پیدا نشد")
             if days[0] <= date <= days[-1]:
-                break
+                self.step(f"هفتهٔ {days[0]} تا {days[-1]}")
+                return page
+            self.step("رفتن به هفتهٔ بعد…" if date > days[-1] else "رفتن به هفتهٔ قبل…")
             arrow = page.locator(SEL["week_next"] if date > days[-1] else SEL["week_prev"]).first
             if await arrow.count() == 0:
                 raise SiteError("دکمهٔ هفتهٔ بعد/قبل در صفحهٔ رزرو پیدا نشد")
             await self.throttle.wait(step=True)
             await self._postback(page, arrow.click)
-        else:
-            raise SiteError(f"هفتهٔ {date} در صفحهٔ رزرو در دسترس نیست")
+        raise SiteError(f"هفتهٔ {date} در صفحهٔ رزرو در دسترس نیست")
+
+    async def read_week(self, date: str) -> dict[str, dict[str, dict]]:
+        """Menu and own reservations of the week containing `date`, from the reservation page.
+
+        Returns {date: {meal: {"foods": [...], "reserved": food or "", "locked": bool}}}.
+        Read-only: the page is only navigated (week arrows), never saved.
+        """
+        page = await self._week_page(date)
 
         week: dict[str, dict[str, dict]] = {}
         for meal, suffix in WEEK_GRIDS.items():
@@ -637,6 +676,92 @@ class CullinanClient:
         except PlaywrightTimeout:
             raise SiteError(f"زبانهٔ {meal} در صفحهٔ رزرو باز نشد") from None
 
+    async def save_week_choices(self, changes: dict[str, dict[str, str]]) -> list[str]:
+        """Reserve, change or cancel weekly reservations, like a user on the reservation page:
+        `changes` is {date: {meal: food name to reserve, or "" to cancel}}. Per week and meal,
+        every day is set first and the meal's save button is pressed once for all of them;
+        then the grid is read again and each day reported as the site saved it."""
+        results: list[str] = []
+        done_days: set[str] = set()
+        for day in sorted(changes):
+            if day in done_days:
+                continue
+            page = await self._week_page(day)
+            label_days = DATE_RE.findall(norm(await self._text(page, SEL["week_label"])))
+            in_week = {d: m for d, m in changes.items() if label_days and label_days[0] <= d <= label_days[-1]}
+            done_days.update(in_week)
+            for meal, suffix in WEEK_GRIDS.items():
+                wanted = {d: m[meal] for d, m in in_week.items() if meal in m}
+                if wanted:
+                    results += await self._save_meal(page, meal, suffix, wanted)
+        return results
+
+    async def _save_meal(self, page: Page, meal: str, suffix: str, wanted: dict[str, str]) -> list[str]:
+        grid_sel = f"[id$='grdReservation{suffix}']"
+        results: list[str] = []
+
+        def row_of(rows: list[dict], day: str) -> int | None:
+            return next((i for i, r in enumerate(rows) if day in norm(r["label"])), None)
+
+        rows = await self._rows(page, grid_sel) or []
+        if not rows:
+            return [f"✗ {meal}: جدولش در صفحهٔ رزرو نیست"]
+        self.step(f"انتخاب {meal}…")
+        await self._show_tab(page, grid_sel, meal)
+        touched: dict[str, str] = {}
+        for day, food in sorted(wanted.items()):
+            i = row_of(rows, day)
+            if i is None:
+                results.append(f"✗ {day} ({meal}): در جدول سایت نیست")
+                continue
+            row = rows[i]
+            if row["check"]["disabled"]:
+                results.append(f"✗ {day} ({meal}): قفل است و دیگر عوض نمی‌شود")
+                continue
+            if food:
+                opt = next((o for o in _real_options(row["food"]) if food_name(o["text"]) == norm(food)), None)
+                if opt is None:
+                    results.append(f"✗ {day} ({meal}): «{food}» در فهرست سایت نیست")
+                    continue
+                if not opt["selected"]:
+                    await self._select(page, row["food"], opt["value"])
+                    rows = await self._rows(page, grid_sel) or []
+                    i = row_of(rows, day)
+                    if i is None:
+                        continue
+                    await self._show_tab(page, grid_sel, meal)  # a postback may switch tabs
+                if not rows[i]["check"]["checked"]:
+                    await page.locator(_css(rows[i]["check"])).check()
+            elif row["check"]["checked"]:
+                await page.locator(_css(row["check"])).uncheck()
+            touched[day] = food
+        if not touched:
+            return results
+        save = page.locator(f"[id$='btnSave{suffix}']").first
+        if await save.count() == 0:
+            return results + [f"✗ {meal}: دکمهٔ ذخیره پیدا نشد؛ چیزی ثبت نشد"]
+        await self._show_tab(page, grid_sel, meal)
+        self.step(f"ذخیرهٔ {meal} ({len(touched)} روز)…")
+        self.dialogs.clear()
+        await self.throttle.wait(step=True)
+        await self._postback(page, save.click)
+        message = norm(" ".join(self.dialogs[-1:]) + " " + await self._text(page, SEL["page_message"]))
+        after = await self._rows(page, grid_sel) or []
+        for day, food in sorted(touched.items()):
+            i = row_of(after, day)
+            row = after[i] if i is not None else None
+            reserved = bool(row) and (row["check"]["checked"] or "رزرو شده" in row["status"])
+            chosen = next((food_name(o["text"]) for o in _real_options(row["food"]) if o["selected"]), "") if row else ""
+            if food and reserved and chosen == norm(food):
+                results.append(f"★ {day} ({meal}): «{food}» رزرو شد")
+            elif not food and row and not reserved:
+                results.append(f"★ {day} ({meal}): رزرو لغو شد")
+            else:
+                results.append(f"✗ {day} ({meal}): {'«' + food + '»' if food else 'لغو'} ثبت نشد")
+        if message:
+            results.append(f"پیام سامانه برای {meal}: {message}")
+        return results
+
     async def auto_reserve_week(self, target_date: str, wanted_meals: list[str],
                                 priorities: dict[str, list[str]] | None = None) -> list[str]:
         """Automatically reserve meals for the week containing `target_date`.
@@ -644,21 +769,7 @@ class CullinanClient:
         Clicks the respective save button for each meal. Each day gets the first food
         matching the meal's priority list (highest first), else the first food offered.
         """
-        page = await self._open(RESERVATION_PATH)
-        for _ in range(4):
-            label = norm(await self._text(page, SEL["week_label"]))
-            days = DATE_RE.findall(label)
-            if len(days) < 2:
-                raise SiteError("بازهٔ هفته در صفحهٔ رزرو پیدا نشد")
-            if days[0] <= target_date <= days[-1]:
-                break
-            arrow = page.locator(SEL["week_next"] if target_date > days[-1] else SEL["week_prev"]).first
-            if await arrow.count() == 0:
-                raise SiteError("دکمهٔ هفتهٔ بعد/قبل در صفحهٔ رزرو پیدا نشد")
-            await self.throttle.wait(step=True)
-            await self._postback(page, arrow.click)
-        else:
-            raise SiteError(f"هفتهٔ {target_date} در صفحهٔ رزرو در دسترس نیست")
+        page = await self._week_page(target_date)
 
         results = []
         save_buttons = {
@@ -678,6 +789,7 @@ class CullinanClient:
             rows = await self._rows(page, grid_sel) or []
             if not rows:
                 continue
+            self.step(f"انتخاب غذاهای {meal}…")
             await self._show_tab(page, grid_sel, meal)
 
             ticked: list[tuple[int, str, str]] = []  # (row index, day, food) ticked for this save
@@ -721,6 +833,7 @@ class CullinanClient:
                     results.append(f"✗ {meal}: دکمهٔ ذخیره در صفحهٔ رزرو پیدا نشد؛ چیزی رزرو نشد")
                     continue
                 await self._show_tab(page, grid_sel, meal)
+                self.step(f"ذخیرهٔ رزرو {meal}…")
                 await self.throttle.wait(step=True)
                 await self._postback(page, save_btn.click)
                 msg = norm(" ".join(self.dialogs[-1:]) + " " + await self._text(page, SEL["page_message"]))

@@ -159,6 +159,8 @@ MIGRATIONS = [
     ("accounts", "priority_lunch", "TEXT NOT NULL DEFAULT ''"),
     ("accounts", "priority_dinner", "TEXT NOT NULL DEFAULT ''"),
     ("accounts", "milk_pref", "TEXT NOT NULL DEFAULT ''"),  # breakfast: '' | plain | flavored
+    # Meals of that day the site no longer lets the account change (JSON list).
+    ("reservations", "locked", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 # An earlier version created user "admin" with this password, published in the
@@ -358,14 +360,18 @@ def week_menu(from_date: str) -> dict[str, dict[str, list[str]]]:
     return {r["date"]: json.loads(r["data"]) for r in rows}
 
 
-def save_reservations(account_id: int, week: dict[str, dict[str, str]]) -> None:
-    """Store {date: {meal: reserved food or ""}} read for one account."""
+def save_reservations(account_id: int, week: dict[str, dict[str, str]],
+                      locked: dict[str, list[str]] | None = None) -> None:
+    """Store {date: {meal: reserved food or ""}} read for one account, and the locked meals per day."""
     now = time.time()
+    locked = locked or {}
     with tx() as c:
         c.executemany(
-            "INSERT INTO reservations (account_id, date, data, fetched_at) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(account_id, date) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at",
-            [(account_id, day, json.dumps(meals, ensure_ascii=False), now) for day, meals in week.items()],
+            "INSERT INTO reservations (account_id, date, data, fetched_at, locked) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(account_id, date) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at, "
+            "locked = excluded.locked",
+            [(account_id, day, json.dumps(meals, ensure_ascii=False), now, json.dumps(locked.get(day, []), ensure_ascii=False))
+             for day, meals in week.items()],
         )
         c.execute("UPDATE accounts SET reservations_at = ? WHERE id = ?", (now, account_id))
 
@@ -413,3 +419,12 @@ def sales(account_id: int, from_date: str) -> dict[str, dict[str, dict]]:
     for r in rows:
         out.setdefault(r["date"], {})[r["meal"]] = dict(r)
     return out
+
+
+def reservation_locks(account_id: int, from_date: str) -> dict[str, list[str]]:
+    """Meals the site no longer lets the account change, per day: {date: [meal, ...]}."""
+    with tx() as c:
+        rows = c.execute(
+            "SELECT date, locked FROM reservations WHERE account_id = ? AND date >= ?", (account_id, from_date)
+        ).fetchall()
+    return {r["date"]: json.loads(r["locked"] or "[]") for r in rows}
