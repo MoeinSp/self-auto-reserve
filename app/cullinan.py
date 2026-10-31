@@ -444,7 +444,7 @@ class CullinanClient:
             self.step(f"باز کردن صفحهٔ {label}…")
         page = await self._goto(url)
         if await self._on_login_page(page) or "login" in page.url.lower():
-            self.step("نشست سلف تمام شده بود")
+            self.step("ورود به سلف لازم است")
             await self.login()
             page = await self._goto(url, step=True)
             if await self._on_login_page(page):
