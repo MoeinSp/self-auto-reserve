@@ -221,6 +221,30 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         await c.close()
         self.assertEqual(len(fake_site.SALES), 2)
 
+    async def test_after_a_buy_reservations_menu_and_credit_are_read(self):
+        from app.worker import Worker
+
+        with db.tx() as c:
+            c.execute("INSERT OR IGNORE INTO users (id, username, password_hash, created_at) VALUES (1, 'u', 'x$y', 0)")
+            aid = c.execute(
+                "INSERT INTO accounts (user_id, site_username, site_password_enc, credit) VALUES (1, 'buy', 'e', '1 ریال')"
+            ).lastrowid
+        from app import jalali
+
+        today = jalali.today_str()
+        if not any(today in w for w in fake_site.WEEKS):
+            self.skipTest("today is outside the fake site's weeks")
+        fake_site.MENU[today] = {"ناهار": {"foods": ["قیمه"], "reserved": "قیمه"}}
+        c = self.client()
+        await c.login()
+        note = await Worker()._after_change(c, aid)
+        await c.close()
+        self.assertIn("جدول رزروها به‌روز شد", note)
+        self.assertIn("3,345,000", note)
+        with db.tx() as conn:
+            self.assertIn("3,345,000", conn.execute("SELECT credit FROM accounts WHERE id = ?", (aid,)).fetchone()["credit"])
+        self.assertEqual(db.reservations(aid, today).get(today), {"ناهار": "قیمه"})
+
     async def test_auto_reserve_opens_hidden_meal_tabs(self):
         # Only the lunch tab is open on the real page; dinner sits in a hidden tab.
         fake_site.MENU["1405/08/09"] = {"ناهار": {"foods": ["قیمه"], "reserved": "قیمه"}, "شام": {"foods": ["ماکارونی", "کتلت"]}}
@@ -776,6 +800,37 @@ class UnitTest(unittest.TestCase):
         web._guest_times[:] = [time.time()] * web.GUESTS_PER_HOUR
         web.login_as_guest(req({}), invite="")
         web._guest_times.clear()
+
+    def test_credit_is_read_again_1h_and_12h_after_a_basket_sale(self):
+        import json
+
+        from app import worker as wmod
+
+        db.set_setting(wmod.CREDIT_LATER_KEY, "{}")
+        w = wmod.Worker()
+        started = []
+
+        async def fake_read(aid):
+            started.append(aid)
+            w.credit_reading.discard(aid)
+
+        w._read_credit_quietly = fake_read
+        w._credit_later(7)
+        plan = json.loads(db.get_setting(wmod.CREDIT_LATER_KEY))
+        self.assertEqual([round(t - time.time()) for t in plan["7"]], [3600, 43200])
+
+        async def tick():
+            w._due_credit_reads()
+            await asyncio.sleep(0)
+
+        asyncio.run(tick())
+        self.assertEqual(started, [])  # nothing due yet
+        db.set_setting(wmod.CREDIT_LATER_KEY, json.dumps({"7": [time.time() - 1, plan["7"][1]]}))
+        asyncio.run(tick())
+        asyncio.run(tick())
+        self.assertEqual(started, [7])  # once, and the 12 h read is still planned
+        self.assertEqual(len(json.loads(db.get_setting(wmod.CREDIT_LATER_KEY))["7"]), 1)
+        db.set_setting(wmod.CREDIT_LATER_KEY, "{}")
 
     def test_payments_are_off(self):
         from starlette.requests import Request

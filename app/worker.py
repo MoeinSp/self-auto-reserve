@@ -35,6 +35,8 @@ RESERVATION_RECHECK = 600  # seconds between "is this meal already reserved?" ch
 PRIORITY_COLUMNS = {"صبحانه": "priority_breakfast", "ناهار": "priority_lunch", "شام": "priority_dinner"}
 AUTO_RESERVE_RETRY = 3600  # seconds before a failed scheduled auto-reserve is tried again
 WEEK_MENU_AUTO_KEY = "week_menu_auto"  # settings key: date of the last scheduled week-menu refresh
+CREDIT_LATER_KEY = "credit_later"  # settings key: JSON {account id: [due times]} of scheduled credit reads
+CREDIT_LATER = (3600, 12 * 3600)  # after a meal goes in the basket: its sale (and the credit) comes later
 
 
 def _explain(exc: Exception) -> str:
@@ -85,6 +87,7 @@ class Worker:
         self.menu_auto_tried = 0.0  # time of the last scheduled refresh attempt
         self.login_throttles: dict[str, Throttle] = {}  # student number -> Throttle, for sign-in with site account
         self.auto_reserve_tried: dict[int, float] = {}  # account id -> time of the last scheduled auto-reserve
+        self.credit_reading: set[int] = set()  # accounts with a scheduled credit read running
         self._pw = None
         self.browser = None
 
@@ -119,6 +122,7 @@ class Worker:
                         self.tasks[aid] = asyncio.create_task(self._run_account(aid))
 
                 self._auto_refresh_week_menu()
+                self._due_credit_reads()
 
                 # Check weekly auto-reserve on Wednesdays
                 today_str = jalali.today_str()
@@ -331,12 +335,10 @@ class Worker:
             results = await client.auto_reserve_week(target, meals, priorities(acc))
             with db.tx() as c:
                 c.execute("UPDATE accounts SET last_auto_reserve = ? WHERE id = ?", (target, account_id))
-            try:
-                await self._sync_weeks(client, account_id)  # show the new reservations in the panel
-            except SiteError:
-                pass
+            after = await self._after_change(client, account_id)  # new reservations, menu and credit in the panel
 
             summary = "؛ ".join(results) if results else "موردی برای رزرو جدید پیدا نشد یا تمام وعده‌ها از قبل رزرو شده بودند."
+            summary += f" ({after})" if after else ""
             db.log(user_id, f"🤖 رزرو خودکار هفته {target}: {summary}", "info")
             return f"رزرو خودکار هفته {target} انجام شد: {summary}"
 
@@ -408,6 +410,75 @@ class Worker:
         return self.start_op(user_id, "بررسی رزروهای هفته", run, account_id=account_id)
 
     @staticmethod
+    def _save_credit(client: CullinanClient, account_id: int, profile: dict) -> str:
+        credit = profile.get("credit", "")
+        if credit:
+            with db.tx() as c:
+                c.execute("UPDATE accounts SET credit = ?, credit_updated_at = ? WHERE id = ?", (credit, time.time(), account_id))
+        return credit
+
+    async def _after_change(self, client: CullinanClient, account_id: int) -> str:
+        """After something that changed reservations and credit (auto-reserve, a basket buy):
+        re-read this week's and next week's reservations and menu, and the credit from the
+        reservation page just opened (fresh, no extra request). Returns a note for the user."""
+        notes = []
+        try:
+            await self._sync_weeks(client, account_id)
+            notes.append("جدول رزروها به‌روز شد")
+        except Exception as exc:
+            log.warning("reservations re-read after a change failed (account %s): %s", account_id, exc)
+        try:
+            credit = self._save_credit(client, account_id, await client.read_profile())
+            if credit:
+                notes.append(f"اعتبار جدید: {credit}")
+        except Exception as exc:
+            log.warning("credit read after a change failed (account %s): %s", account_id, exc)
+        return " · ".join(notes)
+
+    @staticmethod
+    def _credit_later(account_id: int) -> None:
+        """Read the credit again 1 h and 12 h from now (a meal in the basket sells later)."""
+        plan = json.loads(db.get_setting(CREDIT_LATER_KEY) or "{}")
+        now = time.time()
+        plan[str(account_id)] = sorted(set(plan.get(str(account_id), []) + [now + d for d in CREDIT_LATER]))
+        db.set_setting(CREDIT_LATER_KEY, json.dumps(plan))
+
+    def _due_credit_reads(self) -> None:
+        """Start the scheduled credit reads that are due (one browser session each, quietly)."""
+        plan = json.loads(db.get_setting(CREDIT_LATER_KEY) or "{}")
+        now, changed = time.time(), False
+        for aid, times in list(plan.items()):
+            if not any(t <= now for t in times) or int(aid) in self.credit_reading:
+                continue
+            plan[aid] = [t for t in times if t > now]
+            if not plan[aid]:
+                del plan[aid]
+            changed = True
+            self.credit_reading.add(int(aid))
+            asyncio.get_running_loop().create_task(self._read_credit_quietly(int(aid)))
+        if changed:
+            db.set_setting(CREDIT_LATER_KEY, json.dumps(plan))
+
+    async def _read_credit_quietly(self, account_id: int) -> None:
+        client = None
+        try:
+            with db.tx() as c:
+                acc = c.execute("SELECT user_id FROM accounts WHERE id = ?", (account_id,)).fetchone()
+            if not acc:
+                return
+            client = self.client_for(account_id, own_lane=True)
+            await client.login()
+            credit = self._save_credit(client, account_id, await client.read_profile())
+            if credit:
+                db.log(acc["user_id"], f"موجودی سلف خودکار استعلام شد: {credit}", "info")
+        except Exception as exc:
+            log.warning("scheduled credit read failed (account %s): %s", account_id, exc)
+        finally:
+            self.credit_reading.discard(account_id)
+            if client:
+                await client.close()
+
+    @staticmethod
     def _record_sale(account_id: int, date: str, meal: str, info: dict) -> str:
         """Store what the sale page showed; returns a line for the user."""
         food = info.get("food") or meal
@@ -430,6 +501,9 @@ class Worker:
                     done.append(self._record_sale(account_id, date, meal, await client.sell_to_basket(date, meal)))
                 except SiteError as exc:
                     failed.append(f"✗ {exc}")
+            if done:
+                self._credit_later(account_id)
+                done.append("موجودی یک ساعت و ۱۲ ساعت بعد خودکار استعلام می‌شود")
             if failed and not done:
                 raise SiteError(" · ".join(failed))
             return " · ".join(done + failed)
@@ -439,7 +513,12 @@ class Worker:
     def check_sale(self, user_id: int, account_id: int, date: str, meal: str) -> bool:
         """Look once whether a meal waiting in the basket has been sold. Only on demand: never polled."""
         async def run(client: CullinanClient) -> str:
-            return self._record_sale(account_id, date, meal, await client.sale_status(date, meal))
+            info = await client.sale_status(date, meal)
+            note = self._record_sale(account_id, date, meal, info)
+            if info["state"] == "gone":  # sold: the page just opened shows the new credit
+                credit = self._save_credit(client, account_id, await client.read_profile())
+                note += f" · اعتبار جدید: {credit}" if credit else ""
+            return note
 
         return self.start_op(user_id, "بررسی فروش سبد", run, account_id=account_id)
 
@@ -536,6 +615,10 @@ class Worker:
                             with db.tx() as c:
                                 c.execute("UPDATE accounts SET display_name = ? WHERE id = ?", (client.display_name, account_id))
                         self._handle(user_id, row, result, acc["display_name"] or acc["site_username"])
+                        if result.status == "bought":
+                            after = await self._after_change(client, account_id)
+                            if after:
+                                db.log(user_id, f"[{acc['display_name'] or acc['site_username']}] بعد از خرید: {after}", "info", row["id"])
                     except LoginFailed as exc:
                         msg = _explain(exc)
                         db.set_login_state(account_id, False, msg)
