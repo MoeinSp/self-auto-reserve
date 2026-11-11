@@ -184,7 +184,7 @@
     }
     var cell = t.closest('[data-cell]');
     if (cell) { openSheet(cell); return; }
-    if (t.id === 'cellSheet') { closeSheet(); return; }  // a tap on the backdrop
+    if (t.id === 'cellSheet' || t.closest('[data-sheet-close]')) { closeSheet(); return; }  // ×, or a tap on the backdrop
     if (t.closest('[data-sheet-apply]')) { applySheet(); return; }
     if (t.closest('[data-sheet-undo]')) { delete pending[sheetKey]; savePending(); closeSheet(); return; }
     if (t.closest('[data-batch-clear]')) { pending = {}; savePending(); return; }
@@ -237,6 +237,7 @@
   // Prevent double submits (slow site operations) and show progress.
   document.addEventListener('submit', function (e) {
     var form = e.target;
+    if (form.method === 'dialog') return;  // closes a sheet; nothing is sent
     if (form.dataset.sending) { e.preventDefault(); return; }
     form.dataset.sending = '1';
     var btn = e.submitter || $('button:not([type=button])', form);
