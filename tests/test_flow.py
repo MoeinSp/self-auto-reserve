@@ -16,6 +16,7 @@ import uvicorn  # noqa: E402
 from playwright.async_api import async_playwright  # noqa: E402
 
 from pathlib import Path
+from urllib.parse import urljoin
 from app import config, db  # noqa: E402
 config.DB_PATH = Path(tempfile.mkdtemp()) / "test.db"
 db.init()
@@ -171,6 +172,7 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
 
         from app import captcha, web
 
+        config.SECRET_KEY = config.SECRET_KEY or "test-secret"  # the site password is stored encrypted
         web.worker.browser = self.browser
         web.worker.login_throttles.clear()
         with mock.patch.object(captcha, "ocr", return_value=fake_site.CAPTCHA):
@@ -394,6 +396,98 @@ class FakeSiteTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(db.week_menu("1405/08/05")["1405/08/05"]["ناهار"], ["قیمه"])
         self.assertEqual(menu["1405/08/12"]["شام"], ["ماکارونی", "کتلت"])
 
+
+    async def test_messages_page_after_sign_in_is_not_mistaken_for_login(self):
+        fake_site.MENU["1405/08/06"] = {"ناهار": {"foods": ["قیمه"], "reserved": "قیمه"}}
+        fake_site.DETOUR["left"] = 2  # the next two pages show «مدیریت نامه‌ها» instead
+        c = self.client()
+        try:
+            await c.login()
+            page = await c._goto(urljoin(config.SITE_URL, fake_site.MESSAGES_PATH.lstrip("/")))
+            self.assertFalse(await c._on_login_page(page))  # its «نامهٔ جدید» box isn't the login form
+            fake_site.DETOUR["left"] = 2
+            week = await c.read_week("1405/08/06")
+            self.assertEqual(week["1405/08/06"]["ناهار"]["reserved"], "قیمه")
+            self.assertEqual(fake_site.DETOUR["left"], 0)
+
+            # A site that never lets go: a clear error, and the page is kept for tuning the bot.
+            fake_site.DETOUR["left"] = -1
+            await c.page.close()
+            with self.assertRaises(SiteError) as err:
+                await c.sale_status("1405/08/06", "ناهار")
+            self.assertIn("نامه", str(err.exception))
+            self.assertTrue(list((config.DATA_DIR / "detours").glob("*.html")))
+        finally:
+            fake_site.DETOUR["left"] = 0
+            await c.close()
+
+    async def test_ops_queue_per_account_and_run_accounts_in_parallel(self):
+        from unittest import mock
+
+        from app.worker import Worker
+
+        with db.tx() as conn:
+            conn.execute("INSERT OR IGNORE INTO users (id, username, password_hash, created_at) VALUES (1, 'u', 'x$y', 0)")
+            for aid in (31, 32):
+                conn.execute("INSERT OR IGNORE INTO accounts (id, user_id, site_username, site_password_enc) "
+                             "VALUES (?, 1, ?, 'e')", (aid, str(aid)))
+        w = Worker()
+        w.browser = self.browser
+        gate = asyncio.Event()
+        order = []
+
+        def job(name):
+            async def run(client):
+                order.append(f"start {name}")
+                await gate.wait()
+                order.append(f"end {name}")
+                return name
+            return run
+
+        with mock.patch.object(w, "client_for", side_effect=lambda *a, **k: self.client()):
+            self.assertTrue(w.start_op(1, "اول", job("a1"), account_id=31))
+            self.assertTrue(w.start_op(1, "دوم", job("a2"), account_id=31))
+            self.assertFalse(w.start_op(1, "دوم", job("a2"), account_id=31))  # same op already waiting
+            self.assertTrue(w.start_op(1, "سوم", job("b1"), account_id=32))
+            await asyncio.sleep(0.3)
+            states = {op["title"]: op["state"] for op in w.user_ops(1)}
+            self.assertEqual(states, {"اول": "running", "دوم": "queued", "سوم": "running"})
+            self.assertTrue(w.busy(1))
+            gate.set()
+            while w.busy(1):
+                await asyncio.sleep(0.05)
+        self.assertLess(order.index("end a1"), order.index("start a2"))  # one account: one at a time
+        self.assertLess(order.index("start b1"), order.index("end a1"))  # other account: in parallel
+        self.assertEqual([op["state"] for op in w.user_ops(1)], ["ok", "ok", "ok"])
+
+    async def test_batch_reserves_and_sells_in_one_run(self):
+        from unittest import mock
+
+        from app import jalali
+        from app.worker import Worker
+
+        fake_site.MENU["1405/08/06"] = {"ناهار": {"foods": ["قیمه"], "reserved": "قیمه"}}
+        fake_site.MENU["1405/08/07"] = {"ناهار": {"foods": ["قیمه", "کباب"]}, "شام": {"foods": ["کوکو"], "reserved": "کوکو"}}
+        with db.tx() as conn:
+            conn.execute("INSERT OR IGNORE INTO users (id, username, password_hash, created_at) VALUES (1, 'u', 'x$y', 0)")
+            conn.execute("INSERT OR IGNORE INTO accounts (id, user_id, site_username, site_password_enc) VALUES (33, 1, '33', 'e')")
+        w = Worker()
+        w.browser = self.browser
+        c = self.client()
+        with mock.patch.object(w, "client_for", return_value=c), \
+                mock.patch.object(jalali, "today_str", return_value="1405/08/05"), \
+                mock.patch.object(jalali, "get_next_week_days", return_value=[]):
+            self.assertTrue(w.run_batch(1, 33, {"1405/08/07": {"ناهار": "کباب", "شام": ""}},
+                                        [("1405/08/06", "ناهار")], []))
+            while w.busy(1):
+                await asyncio.sleep(0.05)
+        op = w.ops[1]
+        self.assertEqual(op["state"], "ok", op["message"])
+        self.assertIn("3 مورد ثبت شد", op["message"])
+        self.assertEqual(fake_site.SALES, [("1405/08/06", "ناهار")])
+        self.assertEqual(fake_site.MENU["1405/08/07"]["ناهار"]["reserved"], "کباب")
+        self.assertFalse(fake_site.MENU["1405/08/07"]["شام"].get("reserved"))
+        self.assertEqual(db.sales(33, "1405/08/06")["1405/08/06"]["ناهار"]["status"], "listed")
 
 class UnitTest(unittest.TestCase):
     def test_jalali(self):
@@ -791,7 +885,7 @@ class UnitTest(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         body = page.body.decode()
         self.assertIn("رزروهای من", body)
-        self.assertIn('class="res-cell yes"', body)  # the reserved lunch in the week table
+        self.assertIn('class="res-cell yes locked"', body)  # the reserved lunch in the week table (today: locked)
         self.assertIn("رزرو داری: چلو جوجه کباب,دوغ", body)  # and in the buy form
         self.assertIn('value="ناهار|قیمه" disabled', body)
         self.assertIn('value="flavored" class="sr-only" checked', body)
@@ -849,7 +943,7 @@ class UnitTest(unittest.TestCase):
         self.assertIn("داخل سبد قرار دارد · در انتظار فروش", body)
         self.assertIn(f'formaction="/sales/check" formnovalidate name="sale" value="{today}|ناهار"', body)
         self.assertNotIn('name="sells" value="ناهار"', body)
-        self.assertIn('class="res-cell basket"', body)
+        self.assertIn('class="res-cell basket', body)
         res = asyncio.run(web.sell_to_basket(req(session), date=today, sells=["ناهار"], account_id=aid))
         self.assertFalse(web.worker.busy(uid))  # already in the basket: nothing to do
         res = asyncio.run(web.sale_action(req(session), "check", sale=f"{today}|ناهار", account_id=aid))
@@ -918,11 +1012,12 @@ class UnitTest(unittest.TestCase):
 
         from app import jalali, web
 
-        days = [d["date"] for d in jalali.two_weeks_days() if not d["is_past"]][:3]
+        days = [d["date"] for d in jalali.two_weeks_days() if not d["locked"]][:3]
+        today = jalali.today_str()  # today and the next LOCK_DAYS days can't be changed any more
         with db.tx() as c:
             c.execute("INSERT OR IGNORE INTO users (id, username, password_hash, created_at) VALUES (1, 'u', 'x$y', 0)")
             aid = c.execute("INSERT INTO accounts (user_id, site_username, site_password_enc) VALUES (1, 'wk', 'e')").lastrowid
-        db.save_week_menu({d: {"صبحانه": [], "ناهار": ["قیمه", "کباب"], "شام": ["کوکو"]} for d in days})
+        db.save_week_menu({d: {"صبحانه": [], "ناهار": ["قیمه", "کباب"], "شام": ["کوکو"]} for d in days + [today]})
         db.save_reservations(aid, {days[0]: {"ناهار": "قیمه", "شام": "کوکو"}, days[1]: {"ناهار": "قیمه"}},
                              {days[1]: ["ناهار"]})
         form = FormData([
@@ -933,6 +1028,7 @@ class UnitTest(unittest.TestCase):
             (f"pick:{days[2]}:شام", web.NO_RESERVE),  # nothing to cancel
             (f"pick:{days[2]}:صبحانه", "پیتزا"),  # not on the menu
             (f"pick:1300/01/01:ناهار", "قیمه"),  # past
+            (f"pick:{today}:ناهار", "قیمه"),  # within LOCK_DAYS: ignored
         ])
         self.assertEqual(web._week_changes(aid, form), {
             days[0]: {"ناهار": "کباب", "شام": ""}, days[2]: {"ناهار": "قیمه"},
@@ -969,6 +1065,49 @@ class UnitTest(unittest.TestCase):
         self.assertEqual(web._picked_foods("1405/08/05", picks), {"ناهار": ["قورمه سبزی"]})
         self.assertEqual(web._picked_foods("1405/08/06", picks), {"شام": ["ماکارونی"]})
 
+
+    def test_batch_form_picks_only_allowed_changes(self):
+        from unittest import mock
+        from urllib.parse import urlencode
+
+        from starlette.requests import Request
+
+        from app import jalali, web
+
+        all_days = jalali.two_weeks_days()
+        free = [d["date"] for d in all_days if not d["locked"]][:2]
+        locked = [d["date"] for d in all_days if d["locked"] and not d["is_past"]][:1]
+        with db.tx() as c:
+            c.execute("INSERT OR IGNORE INTO users (id, username, password_hash, created_at) VALUES (1, 'u', 'x$y', 0)")
+            aid = c.execute("INSERT INTO accounts (user_id, site_username, site_password_enc) VALUES (1, 'bt', 'e')").lastrowid
+        db.save_week_menu({d: {"صبحانه": [], "ناهار": ["قیمه", "کباب"], "شام": ["کوکو"]} for d in free + locked})
+        db.save_reservations(aid, {free[0]: {"ناهار": "قیمه"}, locked[0]: {"ناهار": "قیمه", "شام": "کوکو"}})
+        db.save_sale(aid, locked[0], "شام", "listed", "کوکو")
+        fields = [
+            ("account_id", aid),
+            (f"pick:{free[0]}:ناهار", "کباب"),  # change: allowed
+            (f"pick:{locked[0]}:ناهار", "کباب"),  # locked day: ignored
+            ("sell", f"{locked[0]}|ناهار"),  # reserved, locked: sell allowed
+            ("sell", f"{free[1]}|ناهار"),  # not reserved: ignored
+            ("unsell", f"{locked[0]}|شام"),  # in the basket: allowed
+            (f"buy:{free[1]}:ناهار", "قیمه"), (f"buy:{free[1]}:ناهار", "کباب"),  # not reserved: a job
+            (f"buy:{free[0]}:ناهار", "قیمه"),  # reserved: ignored
+            (f"buy:{free[1]}:شام", "پیتزا"),  # not on the menu: ignored
+        ]
+        body = urlencode(fields).encode()
+
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        req = Request({"type": "http", "method": "POST", "path": "/batch", "query_string": b"", "session": {"uid": 1},
+                       "headers": [(b"content-type", b"application/x-www-form-urlencoded")]}, receive)
+        with mock.patch.object(web.worker, "run_batch", return_value=True) as run:
+            res = asyncio.run(web.batch(req))
+        self.assertEqual(res.status_code, 303)
+        run.assert_called_once_with(1, aid, {free[0]: {"ناهار": "کباب"}}, [(locked[0], "ناهار")], [(locked[0], "شام")])
+        with db.tx() as c:
+            jobs = c.execute("SELECT date, meal, foods FROM jobs WHERE account_id = ?", (aid,)).fetchall()
+        self.assertEqual([tuple(j) for j in jobs], [(free[1], "ناهار", "قیمه\nکباب")])
 
 if __name__ == "__main__":
     unittest.main()

@@ -176,6 +176,11 @@ def get_next_week_days() -> list[dict]:
     return result
 
 
+# Meals of today and the next LOCK_DAYS days can't be reserved, changed or cancelled any
+# more on the site; they can only be put in the food basket or bought from it.
+LOCK_DAYS = 2
+
+
 def two_weeks_days() -> list[dict]:
     """This week (from Saturday) and next week, for the reservations table."""
     today = now_iran().date()
@@ -191,5 +196,13 @@ def two_weeks_days() -> list[dict]:
             "is_today": g == today,
             "is_past": g < today,
             "week": i // 7,
+            "offset": (g - today).days,
+            "locked": (g - today).days <= LOCK_DAYS,
         })
     return result
+
+
+def is_locked_day(date_str: str) -> bool:
+    """`date_str` is today, in the past or within LOCK_DAYS days (no reserving / changing)."""
+    g = date_to_gregorian(date_str)
+    return g is None or (g - now_iran().date()).days <= LOCK_DAYS

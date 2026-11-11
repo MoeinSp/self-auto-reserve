@@ -29,6 +29,9 @@ SEL = {
     "captcha_img": "#Img1, img[id*='captcha' i], img[src*='captcha' i]",
     "login_button": "#btnEncript, input[type=submit][id*='login' i], button[id*='login' i]",
     "login_error": "[id*='lblMessage' i], [id*='lblError' i], .alert, .error, .validation-summary-errors",
+    # Controls only the sign-in form has (its real ids). A loose match like input[id*=Username]
+    # also hits other pages, e.g. the recipient box of «نامهٔ جدید» on the messages page.
+    "login_form": "#txtUsernamePlain, input[name$='txtUsernamePlain'], #btnEncript",
     # Food basket page (FoodBasket/FoodBasketBuy.aspx): one row per meal.
     "basket_grid": "[id$='grdFoodBasketReservation']",
     "basket_date": "[id$='txtDate']",
@@ -66,6 +69,9 @@ WEEK_GRIDS = {"صبحانه": "Breakfast", "ناهار": "Lunch", "شام": "Din
 # Dropdown entries that mean "nothing selected".
 PLACEHOLDERS = {"", "-", "--", "0", "انتخاب", "انتخاب کنید", "---"}
 LONG_REQUEST = 2.5  # seconds; see _postback
+# Sometimes the site sends a signed-in user to another page first (e.g. the messages page,
+# «مدیریت نامه‌ها» / «نامهٔ جدید»). The wanted page is requested again this many times.
+DETOUR_RETRIES = 2
 WRONG_PASSWORD_HINTS = ("رمز", "کلمه عبور", "نام کاربری")
 ERROR_HINTS = ("خطا", "ناموفق", "کافی نیست", "موجود نیست", "امکان", "مجاز نیست", "error")
 
@@ -333,7 +339,35 @@ class CullinanClient:
         return page
 
     async def _on_login_page(self, page: Page) -> bool:
-        return await page.locator(SEL["username"]).count() > 0
+        """The sign-in form is shown: its own controls, or a password box, captcha box and
+        login button together. One loose match alone is not enough (see SEL["login_form"])."""
+        if await page.locator(SEL["login_form"]).count():
+            return True
+        for key in ("password", "captcha_input", "login_button"):
+            if not await page.locator(SEL[key]).count():
+                return False
+        return True
+
+    @staticmethod
+    def _at(page: Page, path: str) -> bool:
+        """The page shown is `path` (the site didn't send us somewhere else)."""
+        return path.lower().split("?")[0] in page.url.lower().split("?")[0]
+
+    async def _save_detour(self, page: Page) -> str:
+        """Keep the page the site sent us to, so the bot can be taught to handle it."""
+        try:
+            folder = config.DATA_DIR / "detours"
+            folder.mkdir(parents=True, exist_ok=True)
+            name = time.strftime("%Y%m%d-%H%M%S")
+            (folder / f"{name}.html").write_text(await page.content(), encoding="utf-8")
+            await page.screenshot(path=str(folder / f"{name}.png"), full_page=True)
+            for old in sorted(folder.glob("*.html"))[:-10]:  # keep the last 10
+                old.unlink(missing_ok=True)
+                old.with_suffix(".png").unlink(missing_ok=True)
+            return str(folder / name)
+        except Exception as exc:
+            log.warning("could not save detour page: %s", exc)
+            return ""
 
     @staticmethod
     async def _fill(page: Page, selector: str, value: str) -> None:
@@ -451,6 +485,20 @@ class CullinanClient:
             page = await self._goto(url, step=True)
             if await self._on_login_page(page):
                 raise SiteError("بعد از ورود هم صفحه باز نشد")
+        for _ in range(DETOUR_RETRIES):
+            if self._at(page, path):
+                return page
+            # e.g. the messages page after signing in: ask for the wanted page again.
+            log.info("asked for %s, the site showed %s; asking again", path, page.url.split("?")[0])
+            self.step("سلف صفحهٔ دیگری (مثلاً نامه‌ها) را نشان داد؛ دوباره باز می‌کنم…")
+            page = await self._goto(url, step=True)
+        if not self._at(page, path):
+            saved = await self._save_detour(page)
+            log.warning("site keeps showing %s instead of %s (saved: %s)", page.url, path, saved)
+            raise SiteError(
+                f"سلف به‌جای صفحهٔ «{PAGE_LABELS.get(path, path)}» صفحهٔ دیگری نشان می‌دهد "
+                "(احتمالاً نامهٔ خوانده‌نشده). یک بار در سایت سلف وارد شو و نامه‌ها را ببین، بعد دوباره امتحان کن."
+            )
         return page
 
     async def _rows(self, page: Page, table: str) -> list[dict] | None:

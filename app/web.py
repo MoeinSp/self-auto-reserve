@@ -28,6 +28,7 @@ templates.env.filters["ts"] = jalali.format_ts
 templates.env.filters["num"] = lambda x: f"{float(x or 0):g}"  # 20.0 -> 20, 1.5 -> 1.5
 
 MEALS = ["", "صبحانه", "ناهار", "شام"]
+IN_QUEUE = "همین کار الان در صف یا در حال انجام است."
 STATUS_FA = {"active": "در حال پیگیری", "done": "خریداری شد", "stopped": "متوقف", "failed": "ناموفق"}
 templates.env.globals.update(MEALS=MEALS, STATUS_FA=STATUS_FA)
 
@@ -245,9 +246,9 @@ def _get_active_account(request: Request, accounts: list):
 
 def account_status(acc) -> dict:
     """Connection state of one site account, for the panel."""
-    op = worker.ops.get(acc["user_id"])
+    op = next((o for o in worker.user_ops(acc["user_id"]) if o["state"] == "running" and o["account_id"] == acc["id"]), None)
     task = worker.tasks.get(acc["id"])
-    if op and op.get("state") == "running" and op.get("account_id") == acc["id"]:
+    if op:
         status, text = "checking", f"در حال انجام: {op.get('title', 'عملیات')}"
     elif acc["login_state"] == "error":
         status, text = "expired", acc["login_message"] or "ورود ناموفق بود؛ رمز را بررسی کن"
@@ -301,7 +302,7 @@ async def dashboard(request: Request):  # async: it may start a background op
         today=jalali.today_str(), captcha_pending=captcha.manual.pending(uid),
         poll_seconds=config.POLL_SECONDS, max_per_hour=config.MAX_REQUESTS_PER_HOUR,
         min_job_interval=config.MIN_JOB_INTERVAL, statuses=statuses,
-        op=worker.ops.get(uid), now=time.time(),
+        op=worker.ops.get(uid), ops=worker.user_ops(uid), now=time.time(), lock_days=jalali.LOCK_DAYS,
         week_menu=db.week_menu(jalali.today_str()), menu_at=menu_at,
         res_days=res_days, reserved_all=reserved_all, all_menu=all_menu, sales=sales, locks=locks, basket_bought=basket_bought, NO_RESERVE=NO_RESERVE,
         reserved={d: m for d, m in reserved_all.items() if d >= jalali.today_str()},
@@ -425,7 +426,7 @@ async def test_account(
 
     request.session["active_account_id"] = account_id
     if not worker.test_login(uid, account_id):
-        return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+        return _back(f"/?account={account_id}", IN_QUEUE, request)
     return _back(f"/?account={account_id}#account")
 
 
@@ -445,7 +446,7 @@ async def check_reservations(request: Request, account_id: int = Form(...)):
     if not account_id:
         return _back("/", "حساب پیدا نشد.", request)
     if not worker.check_reservations(uid, account_id):
-        return _back(f"/?account={account_id}#reserves", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+        return _back(f"/?account={account_id}#reserves", IN_QUEUE, request)
     return _back(f"/?account={account_id}#reserves")
 
 
@@ -515,7 +516,7 @@ async def sync_credit(request: Request, account_id: int = Form(...)):
         return _back("/", "حساب پیدا نشد.", request)
     request.session["active_account_id"] = account_id
     if not worker.sync_account_profile(uid, account_id):
-        return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+        return _back(f"/?account={account_id}", IN_QUEUE, request)
     return _back(f"/?account={account_id}#account")
 
 
@@ -557,7 +558,7 @@ async def run_auto_reserve_now(request: Request, account_id: int = Form(...)):
         return _back("/", "حساب پیدا نشد.", request)
     request.session["active_account_id"] = account_id
     if not worker.run_auto_reserve(uid, account_id):
-        return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+        return _back(f"/?account={account_id}", IN_QUEUE, request)
     return _back(f"/?account={account_id}#tools")
 
 
@@ -582,7 +583,7 @@ async def get_forgot_receipt_endpoint(
         return _back("/", "حساب پیدا نشد.", request)
     request.session["active_account_id"] = account_id
     if not worker.fetch_forgot_receipt(uid, account_id, day, meal if meal in MEALS else "", str(reserve_type)):
-        return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+        return _back(f"/?account={account_id}", IN_QUEUE, request)
     return _back(f"/?account={account_id}#tools")
 
 
@@ -642,7 +643,7 @@ async def request_pay(
 
     request.session["active_account_id"] = account_id
     if not worker.request_payment_gateway(uid, account_id, amount_rials, int(bank)):
-        return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+        return _back(f"/?account={account_id}", IN_QUEUE, request)
     return _back(f"/?account={account_id}#account")
 
 
@@ -748,7 +749,7 @@ async def refresh_week_menu(request: Request, account_id: int = Form(0)):
     if worker.menu_refreshing:
         return _back(f"/?account={account_id}", "غذاهای هفته همین الان در حال بروزرسانی است؛ چند لحظه صبر کن.", request)
     if not worker.refresh_week_menu(uid, account_id):
-        return _back(f"/?account={account_id}", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+        return _back(f"/?account={account_id}", IN_QUEUE, request)
     return _back(f"/?account={account_id}#buy")
 
 
@@ -807,17 +808,23 @@ def create_job(
         return _back(f"/?account={account_id}", "حداقل یک غذا تیک بزن یا بنویس (یا * برای هر غذایی)", request)
 
     acc_name = acc["display_name"] or acc["site_username"]
+    _add_jobs(uid, account_id, [(day, m, f) for m, f in wanted], quantity, active_from, active_to, poll_seconds)
+    label = f"کار جدید برای «{acc_name}» اضافه شد" if len(wanted) == 1 else f"{len(wanted)} کار جدید برای «{acc_name}» اضافه شد"
+    return _back(f"/?account={account_id}#jobs", f"{label}؛ ربات شروع به پیگیری سبد می‌کند.", request)
+
+
+def _add_jobs(uid: int, account_id: int, wanted: list[tuple[str, str, str]], quantity: int = 1,
+              active_from: str = "", active_to: str = "", poll_seconds: float = 0) -> None:
+    """Basket-buy jobs: one per (date, meal, foods one per line)."""
     with db.tx() as c:
         now = time.time()
-        for job_meal, job_foods in wanted:
+        for day, job_meal, job_foods in wanted:
             c.execute(
                 "INSERT INTO jobs (user_id, account_id, date, meal, foods, quantity, active_from, active_to, poll_seconds, "
                 "skip_if_reserved, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (uid, account_id, day, job_meal, job_foods, max(1, min(quantity, 5)), active_from, active_to,
                  _poll_seconds(poll_seconds), 1, now, now),
             )
-    label = f"کار جدید برای «{acc_name}» اضافه شد" if len(wanted) == 1 else f"{len(wanted)} کار جدید برای «{acc_name}» اضافه شد"
-    return _back(f"/?account={account_id}#jobs", f"{label}؛ ربات شروع به پیگیری سبد می‌کند.", request)
 
 
 @app.post("/sell")
@@ -840,7 +847,7 @@ async def sell_to_basket(  # async: it starts a background op
     if not meals:
         return _back(f"/?account={account_id}#buy", "وعدهٔ رزروشده‌ای برای فروش تیک نزدی.", request)
     if not worker.sell_to_basket(uid, account_id, day, meals):
-        return _back(f"/?account={account_id}#buy", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+        return _back(f"/?account={account_id}#buy", IN_QUEUE, request)
     return _back(f"/?account={account_id}#buy")
 
 
@@ -862,7 +869,7 @@ def _week_changes(account_id: int, form) -> dict[str, dict[str, str]]:
         day, _, meal = rest.partition(":")
         if name != "pick" or meal not in MEALS or not meal or day < today or day not in menu:
             continue
-        if meal in locks.get(day, []) or meal in listed.get(day, {}):
+        if jalali.is_locked_day(day) or meal in locks.get(day, []) or meal in listed.get(day, {}):
             continue
         current = have.get(day, {}).get(meal, "")
         if value == NO_RESERVE:
@@ -886,8 +893,59 @@ async def reserve_week(request: Request):  # async: it starts a background op
     if not changes:
         return _back(f"/?account={account_id}#reserves", "تغییری انتخاب نکردی.", request)
     if not worker.save_week_choices(uid, account_id, changes):
-        return _back(f"/?account={account_id}#reserves", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+        return _back(f"/?account={account_id}#reserves", IN_QUEUE, request)
     return _back(f"/?account={account_id}#reserves")
+
+
+@app.post("/batch")
+async def batch(request: Request):  # async: it starts a background op
+    """Changes picked cell by cell in the reservations table, sent together:
+    "pick:<date>:<meal>" = food or NO_RESERVE (reserve / change / cancel, editable days only),
+    "sell" / "unsell" = "<date>|<meal>" (put in / take out of the basket),
+    "buy:<date>:<meal>" = food, repeatable (watch the basket and buy one of them)."""
+    uid = _uid(request)
+    if not uid:
+        return _back("/login")
+    form = await request.form()
+    account_id = _own_account(uid, form.get("account_id", 0))
+    if not account_id:
+        return _back("/", "حساب پیدا نشد.", request)
+    today = jalali.today_str()
+    have = db.reservations(account_id, today)
+    listed = db.sales(account_id, today)
+    menu = db.week_menu(today)
+
+    changes = _week_changes(account_id, form)
+    sells, unsells, buys = [], [], {}
+    for key, value in form.multi_items():
+        if key in ("sell", "unsell"):
+            day, _, meal = str(value).partition("|")
+            if meal not in MEALS or not meal or day < today:
+                continue
+            sale = listed.get(day, {}).get(meal)
+            if key == "sell" and have.get(day, {}).get(meal) and not sale and meal not in changes.get(day, {}):
+                sells.append((day, meal))
+            elif key == "unsell" and sale and sale["status"] == "listed":
+                unsells.append((day, meal))
+        elif key.startswith("buy:"):
+            _, day, meal = key.split(":", 2) if key.count(":") == 2 else ("", "", "")
+            if meal in MEALS and meal and day >= today and not have.get(day, {}).get(meal) \
+                    and value in menu.get(day, {}).get(meal, []) and value not in buys.get((day, meal), []):
+                buys.setdefault((day, meal), []).append(str(value))
+    sells, unsells = list(dict.fromkeys(sells)), list(dict.fromkeys(unsells))
+    if not (changes or sells or unsells or buys):
+        return _back(f"/?account={account_id}#reserves", "تغییری انتخاب نکردی.", request)
+
+    notes = []
+    if buys:
+        _add_jobs(uid, account_id, [(d, m, "\n".join(f)) for (d, m), f in sorted(buys.items())])
+        notes.append(f"{len(buys)} کار خرید از سبد اضافه شد")
+    if changes or sells or unsells:
+        if worker.run_batch(uid, account_id, changes, sells, unsells):
+            notes.append(f"{sum(len(m) for m in changes.values()) + len(sells) + len(unsells)} تغییر در صف ثبت در سلف قرار گرفت")
+        else:
+            notes.append(IN_QUEUE)
+    return _back(f"/?account={account_id}#reserves", "؛ ".join(notes) + ".", request)
 
 
 SALE_CHECK_GAP = 60  # seconds between two checks of one sale; checks are manual only
@@ -916,7 +974,7 @@ async def sale_action(  # async: it starts a background op
             return _back(f"/?account={account_id}#buy", "این وعده دیگر در سبد نیست.", request)
         started = worker.cancel_sale(uid, account_id, day, meal)
     if not started:
-        return _back(f"/?account={account_id}#buy", "یک عملیات دیگر در حال انجام است؛ صبر کن تمام شود.", request)
+        return _back(f"/?account={account_id}#buy", IN_QUEUE, request)
     return _back(f"/?account={account_id}#buy")
 
 

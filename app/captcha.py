@@ -47,11 +47,17 @@ class ManualCaptchas:
     def __init__(self):
         self.images: dict[int, bytes] = {}
         self._futures: dict[int, asyncio.Future] = {}
+        self._locks: dict[int, asyncio.Lock] = {}
 
     def pending(self, user_id: int) -> bool:
         return user_id in self._futures
 
     async def ask(self, user_id: int, png: bytes) -> str | None:
+        # Two accounts of one user can need a captcha at once: ask one after the other.
+        async with self._locks.setdefault(user_id, asyncio.Lock()):
+            return await self._ask(user_id, png)
+
+    async def _ask(self, user_id: int, png: bytes) -> str | None:
         fut = asyncio.get_running_loop().create_future()
         self.images[user_id] = png
         self._futures[user_id] = fut

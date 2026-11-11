@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% from "_ui.html" import icon, user_menu %}
 {% set has_acc = active_account and active_id != 'new' %}
-{% set running = op and op.state == 'running' %}
+{# Ops are queued, so buttons stay usable while one runs; `running` only speeds up the live refresh. #}
+{% set running = ops|selectattr('state', 'in', ['queued', 'running'])|list|length > 0 %}
 {% set active_jobs = jobs|selectattr('status', 'equalto', 'active')|list %}
 {% set done_jobs = jobs|selectattr('status', 'equalto', 'done')|list %}
 
@@ -26,42 +27,41 @@
 {% endif %}
 </div>
 
-{# ------------------------------------------------------ background operation #}
-<div data-live="op" data-key="{{ (op.state ~ op.started ~ (op.steps|default([])|join('|'))) if op else '' }}" data-state="{{ op.state if op else '' }}">
-{% if op and (running or now - op.finished < 900) %}
-<section class="card op {{ op.state }}" role="status" data-op="{{ op.started }}">
-  <div class="op-icon">{% if running %}<span class="spinner"></span>{% elif op.state == 'ok' %}{{ icon('check') }}{% else %}{{ icon('x') }}{% endif %}</div>
+{# ------------------------------------------------------ background operations #}
+{# Queued, running and recently finished ops; ops of one account run one after another. #}
+<div data-live="op" data-key="{% for o in ops %}{{ o.id }}{{ o.state }}{{ o.steps|default([])|join('|') }};{% endfor %}"
+     data-state="{{ 'running' if running else '' }}" data-done="{{ ops|rejectattr('state', 'in', ['queued', 'running'])|list|length }}">
+{% for o in ops %}
+{% set o_running = o.state == 'running' %}
+<section class="card op {{ o.state }}" role="status" data-op="{{ o.id }}">
+  <div class="op-icon">{% if o_running %}<span class="spinner"></span>{% elif o.state == 'queued' %}{{ icon('clock') }}{% elif o.state == 'ok' %}{{ icon('check') }}{% else %}{{ icon('x') }}{% endif %}</div>
   <div class="op-body">
-    <b>{{ op.title }}</b>
-    {% if running %}
-      <div class="muted small">در حال انجام… <span data-elapsed="{{ (now - op.started)|int }}">{{ (now - op.started)|int }}</span> ثانیه</div>
-      {% if op.steps %}
+    <b>{{ o.title }}{% if accounts|length > 1 and o.account %} <small class="muted">· {{ o.account }}</small>{% endif %}</b>
+    {% if o.state == 'queued' %}
+      <div class="muted small">در صف؛ بعد از کار قبلی همین حساب انجام می‌شود.</div>
+    {% elif o_running %}
+      <div class="muted small">در حال انجام… <span data-elapsed="{{ (now - o.started)|int }}">{{ (now - o.started)|int }}</span> ثانیه</div>
+      {% if o.steps %}
       <ol class="op-steps">
-        {% for st in op.steps %}<li class="{{ 'now' if loop.last else 'done' }}">{% if loop.last %}<span class="spinner sm"></span>{% else %}{{ icon('check') }}{% endif %}<span>{{ st }}</span></li>{% endfor %}
+        {% for st in o.steps %}<li class="{{ 'now' if loop.last else 'done' }}">{% if loop.last %}<span class="spinner sm"></span>{% else %}{{ icon('check') }}{% endif %}<span>{{ st }}</span></li>{% endfor %}
       </ol>
       {% endif %}
-    {% elif op.message and op.message.startswith('PAYMENT_READY:') %}
-      {% set pparts = op.message.split(':') %}
+    {% elif o.message and o.message.startswith('PAYMENT_READY:') %}
+      {% set pparts = o.message.split(':') %}
       <p class="op-msg">درگاه <b>{{ pparts[2] }}</b> برای <b>{{ '{:,}'.format(pparts[3]|int) }} ریال</b> آماده است.</p>
       <div class="btn-row">
         <a href="{{ pparts[1] }}" target="_blank" rel="noopener noreferrer" class="btn ok">{{ icon('card') }} رفتن به درگاه پرداخت</a>
-        {% if has_acc %}
-        <form method="post" action="/account/sync-credit">
-          <input type="hidden" name="account_id" value="{{ active_account.id }}">
-          <button class="btn ghost">{{ icon('refresh') }} بررسی موجودی بعد از پرداخت</button>
-        </form>
-        {% endif %}
       </div>
     {% else %}
-      <p class="op-msg">{{ op.message }}</p>
-      {% if op.steps %}<details class="mini"><summary>مراحل ({{ (op.finished - op.started)|int }} ثانیه)</summary>
-        <ol class="op-steps">{% for st in op.steps %}<li class="done">{{ icon('check') }}<span>{{ st }}</span></li>{% endfor %}</ol>
+      <p class="op-msg">{{ o.message }}</p>
+      {% if o.steps %}<details class="mini"><summary>مراحل ({{ (o.finished - o.started)|int }} ثانیه)</summary>
+        <ol class="op-steps">{% for st in o.steps %}<li class="done">{{ icon('check') }}<span>{{ st }}</span></li>{% endfor %}</ol>
       </details>{% endif %}
     {% endif %}
   </div>
-  {% if not running %}<button type="button" class="icon-btn op-x" aria-label="بستن" data-dismiss-op="{{ op.started }}">{{ icon('x') }}</button>{% endif %}
+  {% if o.state in ('ok', 'error') %}<button type="button" class="icon-btn op-x" aria-label="بستن" data-dismiss-op="{{ o.id }}">{{ icon('x') }}</button>{% endif %}
 </section>
-{% endif %}
+{% endfor %}
 </div>
 
 {# ------------------------------------------------------- shared week menu #}
@@ -75,7 +75,7 @@
   {% set menu_acc = active_account if has_acc else (accounts[0] if accounts else None) %}
   <form method="post" action="/week-menu">
     <input type="hidden" name="account_id" value="{{ menu_acc.id if menu_acc else 0 }}">
-    <button class="btn ghost sm" {% if running or menu_refreshing or not menu_acc %}disabled{% endif %}
+    <button class="btn ghost sm" {% if menu_refreshing or not menu_acc %}disabled{% endif %}
             title="{{ 'اول یک حساب سلف اضافه کن' if not menu_acc else 'غذاهای این هفته و هفتهٔ بعد را برای همه دریافت می‌کند' }}">
       {{ icon('refresh') }} بروزرسانی غذاهای هفته
     </button>
@@ -158,8 +158,8 @@
               <div class="res basket">{{ icon('basket') }} داخل سبد قرار دارد · در انتظار فروش</div>
               <small class="muted">{{ sale.food or got }}{% if sale.price %} · {{ sale.price }}{% endif %} · آخرین بررسی {{ sale.checked_at|ts }}</small>
               <div class="btn-row">
-                <button class="btn ghost sm" formaction="/sales/check" formnovalidate name="sale" value="{{ day }}|{{ meal }}" {% if running %}disabled{% endif %}>{{ icon('refresh') }} بررسی</button>
-                <button class="btn ghost sm danger" formaction="/sales/cancel" formnovalidate name="sale" value="{{ day }}|{{ meal }}" {% if running %}disabled{% endif %}
+                <button class="btn ghost sm" formaction="/sales/check" formnovalidate name="sale" value="{{ day }}|{{ meal }}">{{ icon('refresh') }} بررسی</button>
+                <button class="btn ghost sm danger" formaction="/sales/cancel" formnovalidate name="sale" value="{{ day }}|{{ meal }}"
                         data-confirm="این وعده از سبد برداشته شود؟ رزروش سر جایش می‌ماند.">{{ icon('x') }} حذف از سبد</button>
               </div>
             </div>
@@ -217,7 +217,7 @@
 
     <div class="sticky-submit submit-pair">
       <button class="btn ok block lg">{{ icon('play') }} خرید از سبد</button>
-      <button class="btn sell block lg" formaction="/sell" formnovalidate {% if running %}disabled{% endif %}
+      <button class="btn sell block lg" formaction="/sell" formnovalidate
               data-confirm="وعده‌های تیک‌خورده به سبد غذایی فروخته شوند؟ رزروشان لغو می‌شود.">{{ icon('basket') }} فروش به سبد</button>
     </div>
   </form>
@@ -235,11 +235,11 @@
     <span class="muted small">{% if active_account.reservations_at %}آخرین بررسی {{ active_account.reservations_at|ts }}{% else %}هنوز بررسی نشده{% endif %}</span>
     <form method="post" action="/account/reservations">
       <input type="hidden" name="account_id" value="{{ active_account.id }}">
-      <button class="btn ghost sm" {% if running %}disabled{% endif %}>{{ icon('refresh') }} بررسی دستی</button>
+      <button class="btn ghost sm">{{ icon('refresh') }} بررسی دستی</button>
     </form>
   </div>
 
-  <div data-live="res-table" data-key="{{ active_account.reservations_at }}">
+  <div data-live="res-table" data-key="{{ active_account.reservations_at }}{% for sd, sm in sales.items() %}{% for smeal, sx in sm.items() %}|{{ sd }}{{ smeal }}{{ sx.status }}{% endfor %}{% endfor %}">
   {% for wk in [0, 1] %}
   {% set wdays = res_days|selectattr('week', 'equalto', wk)|list %}
   {% set wcount = namespace(n=0) %}
@@ -262,16 +262,20 @@
         {% for m in MEALS if m %}
         {% set got = day_res.get(m) %}
         {% set sale = sales.get(d.date, {}).get(m) %}
-        {% if sale and sale.status == 'listed' %}
-        <span class="res-cell basket" role="cell" title="داخل سبد، در انتظار فروش: {{ sale.food or got }}">{{ icon('basket') }}<span>در سبد</span></span>
-        {% elif sale and sale.status == 'sold' %}
-        <span class="res-cell sold" role="cell" title="فروخته شد: {{ sale.food }}">{{ icon('check') }}<span>فروخته شد</span></span>
-        {% elif got %}
-        <span class="res-cell yes" role="cell" title="{{ ('از سبد: ' if basket_bought.get(d.date, {}).get(m) else '') ~ got }}">{{ icon('basket' if basket_bought.get(d.date, {}).get(m) else 'check') }}<span>{{ got.split(',')[0] }}</span></span>
-        {% elif day_menu.get(m) %}
-        <span class="res-cell" role="cell" title="رزرو نشده">—</span>
+        {% set foods = day_menu.get(m, []) %}
+        {% set from_basket = basket_bought.get(d.date, {}).get(m) %}
+        {% set state = 'listed' if sale and sale.status == 'listed' else 'sold' if sale and sale.status == 'sold' else 'reserved' if got else 'free' if foods else 'none' %}
+        {% set locked = d.locked or m in locks.get(d.date, []) %}
+        {% set title = {'listed': 'داخل سبد، در انتظار فروش: ' ~ ((sale.food if sale else '') or got or ''), 'sold': 'فروخته شد: ' ~ (sale.food if sale else ''), 'reserved': ('از سبد: ' if from_basket else 'رزرو: ') ~ (got or ''), 'free': 'رزرو نشده', 'none': 'غذا ندارد'}[state] %}
+        {% set inner %}{% if state == 'listed' %}{{ icon('basket') }}<span>در سبد</span>{% elif state == 'sold' %}{{ icon('check') }}<span>فروخته شد</span>{% elif state == 'reserved' %}{{ icon('basket' if from_basket else 'check') }}<span>{{ got.split(',')[0] }}</span>{% elif state == 'free' %}<span class="res-add">{{ icon('plus') }}</span>{% else %}·{% endif %}{% endset %}
+        {% set cls = {'listed': 'basket', 'sold': 'sold', 'reserved': 'yes', 'free': '', 'none': 'none'}[state] %}
+        {% if d.is_past or state in ('none', 'sold') %}
+        <span class="res-cell {{ cls }}" role="cell" title="{{ title }}">{{ inner }}</span>
         {% else %}
-        <span class="res-cell none" role="cell" title="برای این وعده غذایی تعریف نشده">·</span>
+        <button type="button" class="res-cell {{ cls }}{% if locked %} locked{% endif %}" role="cell" title="{{ title }}" data-cell
+                data-date="{{ d.date }}" data-meal="{{ m }}" data-day="{{ d.day_name }} {{ d.short_label }}" data-state="{{ state }}"
+                data-food="{{ (sale.food if state == 'listed' and sale and sale.food else got) or '' }}" data-locked="{{ 1 if locked else 0 }}"
+                data-foods='{{ foods|tojson }}'>{{ inner }}</button>
         {% endif %}
         {% endfor %}
       </div>
@@ -279,43 +283,39 @@
     </div>
   </div>
   {% endfor %}
-  <p class="hint"><span class="res-key yes">{{ icon('check') }}</span> رزرو شده · <span class="res-key">—</span> رزرو نشده · <span class="res-key none">·</span> غذا ندارد · <span class="res-key basket">{{ icon('basket') }}</span> داخل سبد، در انتظار فروش</p>
+  <p class="hint">روی هر خانه بزن تا غذایش را عوض کنی، رزرو یا لغو کنی، یا آن را در سبد بگذاری / از سبد بخری. وعده‌های امروز و {{ lock_days }} روز بعد ({{ icon('alert') }}) قفل‌اند: فقط سبد. تغییرها با هم ثبت می‌شوند.</p>
+  <p class="hint"><span class="res-key yes">{{ icon('check') }}</span> رزرو شده · <span class="res-key">{{ icon('plus') }}</span> رزرو نشده · <span class="res-key none">·</span> غذا ندارد · <span class="res-key basket">{{ icon('basket') }}</span> داخل سبد، در انتظار فروش</p>
   </div>
 
-  {# Like the site's reservation page: pick a food per day and meal; every change of a meal is saved together. #}
-  <form method="post" action="/reserve-week" class="card stack week-pick" id="weekPick">
+  {# Changes picked in the table wait here (and in sessionStorage) until sent together. #}
+  <form method="post" action="/batch" class="batch-bar" id="batchForm" data-account="{{ active_account.id }}" hidden>
     <input type="hidden" name="account_id" value="{{ active_account.id }}">
-    <div class="card-title">{{ icon('list') }}<h2>رزرو، تغییر یا لغو</h2></div>
-    <p class="muted small">مثل صفحهٔ رزرو سایت: برای هر روز غذا را انتخاب کن (یا «رزرو نکن») و «ثبت تغییرات» را بزن. وعده‌های قفل‌شده (معمولاً دو روز آینده) قابل تغییر نیستند.</p>
-    {% for d in res_days if not d.is_past and all_menu.get(d.date) %}
-    {% set day_res = reserved_all.get(d.date, {}) %}
-    <details class="wp-day"{% if loop.first %} open{% endif %}>
-      <summary><b>{{ d.day_name }}</b> <span class="muted">{{ d.short_label }}</span>
-        <span class="wp-sum">{% for m in MEALS if m %}{% if day_res.get(m) %}<span class="res-key yes" title="{{ m }}: {{ day_res[m] }}">{{ m[0] }}</span>{% endif %}{% endfor %}</span>
-      </summary>
-      <div class="meals">
-        {% for m in MEALS if m %}
-        {% set foods = all_menu[d.date].get(m, []) %}
-        {% set got = day_res.get(m, '') %}
-        {% set locked = m in locks.get(d.date, []) or (sales.get(d.date, {}).get(m) and sales[d.date][m].status == 'listed') %}
-        <fieldset class="meal{% if not foods %} empty-meal{% endif %}{% if got %} reserved-meal{% endif %}"{% if locked or not foods %} disabled{% endif %}>
-          <legend>{{ m }}{% if locked %} <small class="muted">· {{ 'در سبد' if m not in locks.get(d.date, []) else 'قفل' }}</small>{% endif %}</legend>
-          {% for f in foods %}
-          <label class="pick"><input type="radio" name="pick:{{ d.date }}:{{ m }}" value="{{ f }}"{% if f == got %} checked{% endif %}><span>{{ f }}</span>{{ icon('check', 'pick-i') }}</label>
-          {% else %}
-          <p class="muted small">غذایی تعریف نشده</p>
-          {% endfor %}
-          {% if foods %}<label class="pick none-pick"><input type="radio" name="pick:{{ d.date }}:{{ m }}" value="{{ NO_RESERVE }}"{% if not got %} checked{% endif %}><span>رزرو نکن</span>{{ icon('check', 'pick-i') }}</label>{% endif %}
-        </fieldset>
-        {% endfor %}
-      </div>
-    </details>
-    {% else %}
-    <p class="muted small">منوی هفته هنوز خوانده نشده؛ «بروزرسانی غذاهای هفته» بالای صفحه را بزن.</p>
-    {% endfor %}
-    <button class="btn ok block lg" {% if running %}disabled{% endif %}
-            data-confirm="تغییرهای انتخاب‌شده در سایت سلف ثبت شوند؟ (رزروهایی که «رزرو نکن» زدی لغو می‌شوند)">{{ icon('check') }} ثبت تغییرات</button>
+    <div class="batch-text"><b data-batch-count>0</b> تغییر آماده<small class="muted" data-batch-list></small></div>
+    <button type="button" class="btn ghost sm" data-batch-clear>پاک کردن</button>
+    <button class="btn ok" data-confirm="تغییرهای انتخاب‌شده در سلف ثبت شوند؟">{{ icon('check') }} ثبت همه</button>
   </form>
+
+  <dialog class="sheet" id="cellSheet" aria-labelledby="sheetTitle">
+    <form method="dialog" class="sheet-body">
+      <header class="sheet-head">
+        <div><h2 id="sheetTitle"></h2><small class="muted" data-sheet-status></small></div>
+        <button value="cancel" class="icon-btn" aria-label="بستن">{{ icon('x') }}</button>
+      </header>
+      <section data-sheet-reserve>
+        <div class="sheet-label">رزرو</div>
+        <div class="sheet-options" data-sheet-foods></div>
+      </section>
+      <p class="note warn" data-sheet-locked hidden>{{ icon('alert') }} این وعده قفل است (امروز یا {{ lock_days }} روز آینده): رزرو، تغییر یا لغو نمی‌شود؛ فقط سبد غذایی.</p>
+      <section data-sheet-basket>
+        <div class="sheet-label">سبد غذایی</div>
+        <div class="sheet-options" data-sheet-basket-opts></div>
+      </section>
+      <div class="sheet-actions">
+        <button type="button" class="btn ghost" data-sheet-undo hidden>برگرداندن</button>
+        <button type="button" class="btn primary" data-sheet-apply>{{ icon('check') }} تأیید</button>
+      </div>
+    </form>
+  </dialog>
 
   <div class="card stack">
     <div class="card-title">{{ icon('calendar') }}<h2>رزرو خودکار هفتگی</h2></div>
@@ -334,7 +334,7 @@
       </div>
       <div class="btn-row">
         <button class="btn ghost">ذخیره وعده‌ها</button>
-        <button class="btn ghost" formaction="/account/auto-reserve/run-now" formnovalidate {% if running %}disabled{% endif %}>{{ icon('bolt') }} اجرای همین حالا</button>
+        <button class="btn ghost" formaction="/account/auto-reserve/run-now" formnovalidate>{{ icon('bolt') }} اجرای همین حالا</button>
       </div>
       <p class="muted small">{% if active_account.last_auto_reserve %}آخرین اجرا: هفتهٔ {{ active_account.last_auto_reserve }}{% else %}هنوز اجرا نشده{% endif %}</p>
     </form>
@@ -462,11 +462,11 @@
     <div class="btn-row">
       <form method="post" action="/account/test">
         <input type="hidden" name="account_id" value="{{ active_account.id }}">
-        <button class="btn primary" {% if running %}disabled{% endif %}>{{ icon('check') }} تست ورود</button>
+        <button class="btn primary">{{ icon('check') }} تست ورود</button>
       </form>
       <form method="post" action="/account/sync-credit">
         <input type="hidden" name="account_id" value="{{ active_account.id }}">
-        <button class="btn ghost" {% if running %}disabled{% endif %}>{{ icon('refresh') }} استعلام موجودی</button>
+        <button class="btn ghost">{{ icon('refresh') }} استعلام موجودی</button>
       </form>
     </div>
   </div>
@@ -551,7 +551,7 @@
           </select>
         </label>
       </div>
-      <button class="btn primary block" {% if running %}disabled{% endif %}>{{ icon('ticket') }} گرفتن کد فیش</button>
+      <button class="btn primary block">{{ icon('ticket') }} گرفتن کد فیش</button>
     </form>
   </div>
   {% endif %}

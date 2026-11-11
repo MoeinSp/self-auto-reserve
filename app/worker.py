@@ -81,8 +81,11 @@ class Worker:
         self.PAYMENT_SESSIONS = PAYMENT_SESSIONS
         self.tasks: dict[int, asyncio.Task] = {}  # account_id -> task
         self.throttles: dict[int, Throttle] = {}  # account_id -> Throttle
-        # One on-demand operation (login test / menu fetch) per user, shown on the dashboard.
-        self.ops: dict[int, dict] = {}  # user_id -> op dict
+        # On-demand operations (login test, sell, reserve, ...) shown on the dashboard. They are
+        # queued: one at a time per account (they share its site session), accounts in parallel.
+        self.ops: dict[int, dict] = {}  # user_id -> the op started last
+        self.op_list: dict[int, list[dict]] = {}  # user_id -> recent ops, oldest first
+        self.account_locks: dict[int, asyncio.Lock] = {}  # account_id -> lock held while an op runs
         self.reservation_checked: dict[int, float] = {}  # job id -> monotonic time of last check
         self.menu_refreshing = False  # one shared week-menu refresh at a time
         self.menu_auto_tried = 0.0  # time of the last scheduled refresh attempt
@@ -265,33 +268,66 @@ class Worker:
                 asyncio.get_running_loop().create_task(self._close_context(context))
 
     def busy(self, user_id: int) -> bool:
-        op = self.ops.get(user_id)
-        return bool(op and op["state"] == "running")
+        """Some operation of this user is running or waiting in the queue."""
+        return any(op["state"] in ("queued", "running") for op in self.op_list.get(user_id, []))
 
-    def start_op(self, user_id: int, title: str, run: Callable[[CullinanClient], Awaitable[str]], account_id: int = 0) -> bool:
-        """Run `run` in the background with its own browser session; False if one is already running."""
-        if self.busy(user_id):
+    def user_ops(self, user_id: int, keep: float = 900) -> list[dict]:
+        """Running and queued ops, and those finished in the last `keep` seconds; newest first."""
+        now = time.time()
+        return [op for op in reversed(self.op_list.get(user_id, []))
+                if op["state"] in ("queued", "running") or now - op.get("finished", now) < keep]
+
+    def start_op(self, user_id: int, title: str, run: Callable[[CullinanClient], Awaitable[str]],
+                 account_id: int = 0, key: str = "") -> bool:
+        """Queue `run` to run in the background on the account's site session. Ops of one account
+        run one after another, different accounts in parallel. False only if the same op (same
+        `key`, default the title) is already waiting or running for this account."""
+        key = key or title
+        if any(op["key"] == key and op["account_id"] == account_id and op["state"] in ("queued", "running")
+               for op in self.op_list.get(user_id, [])):
             return False
-        op = self.ops[user_id] = {
+        lock = self.account_locks.setdefault(account_id, asyncio.Lock())
+        waiting = lock.locked() or any(
+            o["account_id"] == account_id and o["state"] in ("queued", "running") for o in self.op_list.get(user_id, []))
+        op = {
+            "id": f"{time.time():.6f}",
             "title": title,
-            "state": "running",
+            "key": key,
+            "state": "queued" if waiting else "running",
             "message": "",
             "started": time.time(),
+            "queued": time.time(),
             "account_id": account_id,
+            "account": self._account_label(account_id),
+            "steps": [],
         }
-
-        op["steps"] = []
+        ops = self.op_list.setdefault(user_id, [])
+        ops.append(op)
+        # Forget old finished ones; the ones still running or queued always stay.
+        while len(ops) > 12 and ops[0]["state"] not in ("queued", "running"):
+            ops.pop(0)
+        self.ops[user_id] = op
 
         def step(text: str) -> None:
             op["steps"] = (op["steps"] + [text])[-8:]
 
         async def go():
-            client = self.client_for(account_id, own_lane=True)
-            client.interactive = True
-            client.step = step
-            await self._lend_session(account_id, client)
-            keep = False
+            async with lock:
+                op["state"], op["started"] = "running", time.time()
+                await run_op()
+
+        async def run_op():
+            client, keep = None, False
             try:
+                with db.tx() as c:
+                    acc = c.execute("SELECT login_state, login_at FROM accounts WHERE id = ?", (account_id,)).fetchone()
+                # A wrong password while this op waited: don't try it again (it could lock the account).
+                if acc and acc["login_state"] == "error" and acc["login_at"] > op["queued"]:
+                    raise SiteError("ورود به این حساب همین الان ناموفق بود؛ اول رمز را درست کن، بعد دوباره امتحان کن.")
+                client = self.client_for(account_id, own_lane=True)
+                client.interactive = True
+                client.step = step
+                await self._lend_session(account_id, client)
                 op["message"] = await asyncio.wait_for(run(client), OP_TIMEOUT)
                 op["state"] = "ok"
                 keep = True
@@ -307,14 +343,22 @@ class Worker:
                 db.log(user_id, f"{title} ناموفق: {op['message']}", "error")
             finally:
                 op["finished"] = time.time()
-                await self._return_session(account_id, client, keep)
+                if client:
+                    await self._return_session(account_id, client, keep)
 
         try:
             asyncio.get_running_loop().create_task(go())
         except RuntimeError:  # not called from the event loop: don't leave a stuck "running" op
-            del self.ops[user_id]
+            ops.remove(op)
+            self.ops.pop(user_id, None)
             raise
         return True
+
+    @staticmethod
+    def _account_label(account_id: int) -> str:
+        with db.tx() as c:
+            acc = c.execute("SELECT display_name, site_username FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        return (acc["display_name"] or acc["site_username"]) if acc else ""
 
     def test_login(self, user_id: int, account_id: int) -> bool:
         async def run(client: CullinanClient) -> str:
@@ -379,7 +423,7 @@ class Worker:
             err_msg = res.get("message") or "فیش فراموشی صادر نشد"
             raise SiteError(f"دریافت فیش برای {meal_label} ({date_label}) ناموفق: {err_msg}")
 
-        return self.start_op(user_id, "دریافت فیش فراموشی", run, account_id=account_id)
+        return self.start_op(user_id, "دریافت فیش فراموشی", run, account_id=account_id, key=f"receipt:{date}:{meal}:{reserve_type}")
 
     def run_auto_reserve(self, user_id: int, account_id: int, target_week_date: str = "") -> bool:
         async def run(client: CullinanClient) -> str:
@@ -573,7 +617,7 @@ class Worker:
                 raise SiteError(" · ".join(failed))
             return " · ".join(done + failed)
 
-        return self.start_op(user_id, "فروش به سبد غذایی", run, account_id=account_id)
+        return self.start_op(user_id, "فروش به سبد غذایی", run, account_id=account_id, key=f"sell:{date}:{meals}")
 
     def save_week_choices(self, user_id: int, account_id: int, changes: dict[str, dict[str, str]]) -> bool:
         """Reserve / change / cancel weekly reservations chosen in the panel, then refresh the table and credit."""
@@ -587,7 +631,44 @@ class Worker:
                 raise SiteError(text)
             return text
 
-        return self.start_op(user_id, "ثبت رزرو هفتگی", run, account_id=account_id)
+        return self.start_op(user_id, "ثبت رزرو هفتگی", run, account_id=account_id,
+                             key=f"week:{json.dumps(changes, sort_keys=True, ensure_ascii=False)}")
+
+    def run_batch(self, user_id: int, account_id: int, changes: dict[str, dict[str, str]],
+                  sells: list[tuple[str, str]], unsells: list[tuple[str, str]]) -> bool:
+        """Several changes picked in the reservations table, in one run on the account's session:
+        reserve / change / cancel (`changes` as in save_week_choices), put reserved meals in the
+        basket (`sells`, (date, meal)) and take meals out of it (`unsells`)."""
+        async def run(client: CullinanClient) -> str:
+            lines: list[str] = []
+            ok = 0
+            if changes:
+                results = await client.save_week_choices(changes)
+                ok += sum(r.startswith("★") for r in results)
+                lines += results
+            for date, meal in sells:
+                try:
+                    lines.append("★ " + self._record_sale(account_id, date, meal, await client.sell_to_basket(date, meal)))
+                    ok += 1
+                except SiteError as exc:
+                    lines.append(f"✗ {exc}")
+            for date, meal in unsells:
+                try:
+                    lines.append("★ " + self._record_sale(account_id, date, meal, await client.cancel_sale(date, meal)))
+                    ok += 1
+                except SiteError as exc:
+                    lines.append(f"✗ {exc}")
+            if sells and ok:
+                self._credit_later(account_id)
+            after = await self._after_change(client, account_id) if ok else ""
+            text = " · ".join([f"{ok} مورد ثبت شد" if ok else "چیزی ثبت نشد"] + lines + ([after] if after else []))
+            if not ok and any(r.startswith("✗") for r in lines):
+                raise SiteError(text)
+            return text
+
+        count = sum(len(m) for m in changes.values()) + len(sells) + len(unsells)
+        return self.start_op(user_id, f"ثبت {count} تغییر رزرو و سبد", run, account_id=account_id,
+                             key=f"batch:{json.dumps([changes, sells, unsells], sort_keys=True, ensure_ascii=False)}")
 
     def check_sale(self, user_id: int, account_id: int, date: str, meal: str) -> bool:
         """Look once whether a meal waiting in the basket has been sold. Only on demand: never polled."""
@@ -599,14 +680,14 @@ class Worker:
                 note += f" · اعتبار جدید: {credit}" if credit else ""
             return note
 
-        return self.start_op(user_id, "بررسی فروش سبد", run, account_id=account_id)
+        return self.start_op(user_id, "بررسی فروش سبد", run, account_id=account_id, key=f"check-sale:{date}:{meal}")
 
     def cancel_sale(self, user_id: int, account_id: int, date: str, meal: str) -> bool:
         """Take a meal waiting in the basket back out; it stays reserved."""
         async def run(client: CullinanClient) -> str:
             return self._record_sale(account_id, date, meal, await client.cancel_sale(date, meal))
 
-        return self.start_op(user_id, "حذف از سبد غذایی", run, account_id=account_id)
+        return self.start_op(user_id, "حذف از سبد غذایی", run, account_id=account_id, key=f"unsell:{date}:{meal}")
 
     def refresh_week_menu(self, user_id: int, account_id: int, auto: bool = False) -> bool:
         """Read this week's and next week's menu once and store it for everyone."""

@@ -15,6 +15,13 @@ FastAPI, Playwright, SQLite. See README.md (Persian) for architecture.
   `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
 - UI: Jinja templates + `app/static/style.css` + `app/static/app.js` (tabs,
   live refresh of `[data-live]` regions). Mobile-first; check at 390px width.
+- On-demand site operations are queued (`Worker.start_op`): one at a time per
+  account (they share its site session), different accounts in parallel.
+- Meals of today and the next `jalali.LOCK_DAYS` days can't be reserved,
+  changed or cancelled; only sold to / bought from the basket.
+- If the site shows another page than the one requested (e.g. the messages
+  page after sign-in), `CullinanClient._open` asks again and, failing that,
+  saves the page under `DATA_DIR/detours/` for tuning selectors.
 
 ## Conventions
 - Communicate with the user in Persian (Farsi); keep code, identifiers and commit messages in English.

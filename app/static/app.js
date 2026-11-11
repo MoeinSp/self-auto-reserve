@@ -59,7 +59,8 @@
   var doneCount = null;
   function typing() {
     var el = document.activeElement;
-    return el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+    var sheet = $('#cellSheet');
+    return (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) || !!(sheet && sheet.open);
   }
   function schedule(ms) {
     clearTimeout(timer);
@@ -79,7 +80,8 @@
         $$('[data-live]').forEach(function (el) {
           var next = doc.querySelector('[data-live="' + el.dataset.live + '"]');
           if (!next) return;
-          if (el.dataset.live === 'op' && el.dataset.state === 'running' && next.dataset.state !== 'running') reload = true;
+          // An operation finished (ops are queued, so count them): reload for its results.
+          if (el.dataset.live === 'op' && (parseInt(next.dataset.done, 10) || 0) > (parseInt(el.dataset.done, 10) || 0)) reload = true;
           if (el.contains(document.activeElement)) return;
           if (el.dataset.key !== undefined && el.dataset.key === next.dataset.key) return;
           if (el.innerHTML === next.innerHTML) return;
@@ -93,6 +95,7 @@
       .catch(function () { schedule(15000); });
   }
   function afterSwap() {
+    paintPending();
     applyJobFilter();
     hideDismissedOp();
     tickElapsed();
@@ -120,17 +123,21 @@
   }
 
   // ------------------------------------------------------- operation card
+  function dismissedOps() { return (store.get('ops-dismissed') || '').split(',').filter(Boolean); }
   function hideDismissedOp() {
-    var btn = $('[data-dismiss-op]');
-    if (btn && store.get('op-dismissed') === btn.dataset.dismissOp) btn.closest('.op').hidden = true;
+    var gone = dismissedOps();
+    $$('[data-dismiss-op]').forEach(function (btn) {
+      if (gone.indexOf(btn.dataset.dismissOp) >= 0) btn.closest('.op').hidden = true;
+    });
   }
   var elapsedTimer = null;
   function tickElapsed() {
     clearInterval(elapsedTimer);
-    var el = $('[data-elapsed]');
-    if (!el) return;
-    var n = parseInt(el.dataset.elapsed, 10) || 0;
-    elapsedTimer = setInterval(function () { el.textContent = ++n; }, 1000);
+    var els = $$('[data-elapsed]');
+    if (!els.length) return;
+    elapsedTimer = setInterval(function () {
+      els.forEach(function (el) { el.textContent = (parseInt(el.textContent, 10) || 0) + 1; });
+    }, 1000);
   }
 
   // ---------------------------------------------------------------- events
@@ -170,7 +177,17 @@
     var close = t.closest('[data-toast-close]');
     if (close) { close.closest('[data-toast]').remove(); return; }
     var dismiss = t.closest('[data-dismiss-op]');
-    if (dismiss) { store.set('op-dismissed', dismiss.dataset.dismissOp); dismiss.closest('.op').hidden = true; return; }
+    if (dismiss) {
+      store.set('ops-dismissed', dismissedOps().concat(dismiss.dataset.dismissOp).slice(-30).join(','));
+      dismiss.closest('.op').hidden = true;
+      return;
+    }
+    var cell = t.closest('[data-cell]');
+    if (cell) { openSheet(cell); return; }
+    if (t.id === 'cellSheet') { closeSheet(); return; }  // a tap on the backdrop
+    if (t.closest('[data-sheet-apply]')) { applySheet(); return; }
+    if (t.closest('[data-sheet-undo]')) { delete pending[sheetKey]; savePending(); closeSheet(); return; }
+    if (t.closest('[data-batch-clear]')) { pending = {}; savePending(); return; }
     if (t.closest('[data-theme-toggle]')) {
       var next = THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length];
       store.set('theme', next);
@@ -233,6 +250,171 @@
     });
   });
 
+  // ------------------------------------------------- reservations table editor
+  // Tapping a cell opens a sheet: reserve / change / cancel (days that aren't locked), put a
+  // reserved meal in the basket, take it out, or buy from the basket. Choices wait in
+  // `pending` (kept in sessionStorage across reloads) and are sent together by #batchForm.
+  var pending = {};
+  var sheetKey = null;
+  var ss = {
+    get: function (k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+    set: function (k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} },
+  };
+  function batchForm() { return $('#batchForm'); }
+  function pendingKey() { var f = batchForm(); return f ? 'pending:' + f.dataset.account : null; }
+  function loadPending() {
+    var k = pendingKey();
+    try { pending = (k && JSON.parse(ss.get(k) || '{}')) || {}; } catch (e) { pending = {}; }
+  }
+  function savePending() {
+    var k = pendingKey();
+    if (k) ss.set(k, JSON.stringify(pending));
+    paintPending();
+  }
+  function cellFor(key) {
+    var p = key.split('|');
+    return $('[data-cell][data-date="' + p[0] + '"][data-meal="' + p[1] + '"]');
+  }
+  function describe(ch) {
+    if (ch.pick === '-') return 'لغو رزرو';
+    if (ch.pick) return '← ' + ch.pick;
+    if (ch.sell) return 'به سبد';
+    if (ch.unsell) return 'از سبد بردار';
+    if (ch.buy && ch.buy.length) return 'خرید از سبد';
+    return '';
+  }
+  function paintPending() {
+    var form = batchForm();
+    if (!form) return;
+    $$('[data-cell].pending').forEach(function (c) {
+      c.classList.remove('pending');
+      var tag = $('.pend-tag', c);
+      if (tag) tag.remove();
+    });
+    var list = [];
+    Object.keys(pending).forEach(function (key) {
+      var c = cellFor(key);
+      var text = describe(pending[key]);
+      if (!c || !text) { delete pending[key]; return; }  // the cell changed meanwhile
+      c.classList.add('pending');
+      var tag = document.createElement('small');
+      tag.className = 'pend-tag';
+      tag.textContent = text;
+      c.appendChild(tag);
+      list.push(c.dataset.meal + ' ' + c.dataset.day.split(' ')[0] + ': ' + text);
+    });
+    var n = list.length;
+    form.hidden = !n;
+    document.body.classList.toggle('has-batch', !!n);
+    $('[data-batch-count]', form).textContent = n;
+    $('[data-batch-list]', form).textContent = list.join(' · ');
+  }
+  function option(type, name, value, text, checked, extra) {
+    var label = document.createElement('label');
+    label.className = 'pick' + (extra ? ' ' + extra : '');
+    var input = document.createElement('input');
+    input.type = type; input.name = name; input.value = value; input.checked = !!checked;
+    var span = document.createElement('span');
+    span.textContent = text;
+    label.appendChild(input); label.appendChild(span);
+    return label;
+  }
+  function openSheet(cell) {
+    var sheet = $('#cellSheet');
+    if (!sheet || !sheet.showModal) return;
+    sheetKey = cell.dataset.date + '|' + cell.dataset.meal;
+    var st = cell.dataset.state, food = cell.dataset.food, locked = cell.dataset.locked === '1';
+    var foods = [];
+    try { foods = JSON.parse(cell.dataset.foods || '[]'); } catch (e) {}
+    var ch = pending[sheetKey] || {};
+    $('#sheetTitle').textContent = cell.dataset.meal + ' · ' + cell.dataset.day;
+    $('[data-sheet-status]', sheet).textContent = {
+      reserved: 'رزرو داری: ' + food, listed: 'داخل سبد، در انتظار فروش: ' + food, free: 'رزرو نداری',
+    }[st] || '';
+
+    // Reserve / change / cancel: only days that aren't locked, and not while it waits in the basket.
+    var canPick = !locked && st !== 'listed' && foods.length > 0;
+    var box = $('[data-sheet-foods]', sheet);
+    box.innerHTML = '';
+    if (canPick) {
+      foods.forEach(function (f) {
+        box.appendChild(option('radio', 'sheet-pick', f, f, ch.pick ? ch.pick === f : f === food));
+      });
+      box.appendChild(option('radio', 'sheet-pick', '-', st === 'reserved' ? 'لغو رزرو' : 'رزرو نکن',
+        ch.pick ? ch.pick === '-' : st !== 'reserved', 'none-pick'));
+    }
+    $('[data-sheet-reserve]', sheet).hidden = !canPick;
+    $('[data-sheet-locked]', sheet).hidden = !locked;
+
+    var bbox = $('[data-sheet-basket-opts]', sheet);
+    bbox.innerHTML = '';
+    if (st === 'reserved') {
+      bbox.appendChild(option('checkbox', 'sheet-sell', '1', 'گذاشتن در سبد برای فروش (رزروت فروخته می‌شود)', ch.sell));
+    } else if (st === 'listed') {
+      bbox.appendChild(option('checkbox', 'sheet-unsell', '1', 'برداشتن از سبد (رزرو برای خودت می‌ماند)', ch.unsell));
+    } else if (st === 'free') {
+      var hint = document.createElement('p');
+      hint.className = 'muted small';
+      hint.textContent = 'خرید از سبد: هر کدام زودتر در سبد بیاید خریده می‌شود.';
+      bbox.appendChild(hint);
+      foods.forEach(function (f) {
+        bbox.appendChild(option('checkbox', 'sheet-buy', f, f, (ch.buy || []).indexOf(f) >= 0));
+      });
+    }
+    $('[data-sheet-basket]', sheet).hidden = !bbox.children.length;
+    $('[data-sheet-undo]', sheet).hidden = !pending[sheetKey];
+    sheet.showModal();
+  }
+  function closeSheet() {
+    var sheet = $('#cellSheet');
+    if (sheet && sheet.open) sheet.close();
+    sheetKey = null;
+  }
+  function applySheet() {
+    var sheet = $('#cellSheet');
+    var cell = sheetKey && cellFor(sheetKey);
+    if (!sheet || !cell) return closeSheet();
+    var st = cell.dataset.state, food = cell.dataset.food;
+    var ch = {};
+    var pick = $('input[name="sheet-pick"]:checked', sheet);
+    if (pick && pick.value !== (st === 'reserved' ? food : '-')) ch.pick = pick.value;
+    var sell = $('input[name="sheet-sell"]:checked', sheet);
+    var unsell = $('input[name="sheet-unsell"]:checked', sheet);
+    var buy = $$('input[name="sheet-buy"]:checked', sheet).map(function (i) { return i.value; });
+    if (ch.pick) {
+      // A new reservation choice wins; basket actions for the same meal don't mix with it.
+      if (ch.pick !== '-' && st === 'free' && buy.length) ch.buy = [];
+    } else {
+      if (sell) ch.sell = true;
+      if (unsell) ch.unsell = true;
+      if (buy.length) ch.buy = buy;
+    }
+    if (describe(ch)) pending[sheetKey] = ch; else delete pending[sheetKey];
+    savePending();
+    closeSheet();
+  }
+  // Turn `pending` into the form fields /batch reads, right before sending.
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (form.id !== 'batchForm') return;
+    $$('input[data-gen]', form).forEach(function (i) { i.remove(); });
+    function add(name, value) {
+      var i = document.createElement('input');
+      i.type = 'hidden'; i.name = name; i.value = value; i.dataset.gen = '1';
+      form.appendChild(i);
+    }
+    Object.keys(pending).forEach(function (key) {
+      var p = key.split('|'), ch = pending[key];
+      if (ch.pick) add('pick:' + p[0] + ':' + p[1], ch.pick);
+      if (ch.sell) add('sell', key);
+      if (ch.unsell) add('unsell', key);
+      (ch.buy || []).forEach(function (f) { add('buy:' + p[0] + ':' + p[1], f); });
+    });
+    pending = {};
+    var k = pendingKey();
+    if (k) ss.set(k, '{}');
+  }, true);
+
   // ------------------------------------------------------------------ init
   function init() {
     applyTheme(currentTheme());
@@ -245,6 +427,7 @@
     var speed = $('[data-speed]');
     if (speed) speedWarn(speed);
     $$('[data-cap-toggle]').forEach(syncCap);
+    loadPending();
     afterSwap();
     var poll = parseInt(document.body.dataset.livePoll, 10);
     if (poll > 0) schedule(poll);

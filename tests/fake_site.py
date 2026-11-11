@@ -19,6 +19,10 @@ USER, PASSWORD = "40300000", "secret"
 STOCK: dict[str, dict[str, dict[str, int]]] = {}
 PURCHASES: list[tuple[str, str, str, int]] = []
 state = {"basket_loads": 0}
+# Pages to send a signed-in user to the messages page instead (like the real site does
+# sometimes after signing in); tests set it. -1 = always.
+DETOUR = {"left": 0}
+MESSAGES_PATH = "/Message/MessageManagement.aspx"
 
 app = FastAPI()
 
@@ -54,6 +58,22 @@ def login_page(request: Request, error: str = ""):
       <img src="https://news.example.invalid/emoji.png" width="18" height="18">
       <img id="Img1" src="/captcha.png" width="80" height="30"><input id="txtCaptcha" name="c" maxlength="4">
       <input type="submit" id="btnEncript" value="ورود">{msg}</form></body></html>""")
+
+
+@app.get(MESSAGES_PATH)
+def messages(request: Request):
+    """«مدیریت نامه‌ها» with a «نامهٔ جدید» form: its recipient box looks like a username field."""
+    return HTMLResponse(f"""<html><body>{PROFILE_SNIPPET}<h1>مدیریت نامه‌ها</h1>
+      <form method="post"><h2>نامه جدید</h2><input id="cphMain_txtUserName" name="to">
+      <textarea name="body"></textarea><input type="submit" id="cphMain_btnSend" value="ارسال"></form>{LONG_POLL}</body></html>""")
+
+
+def _detour(request: Request):
+    if request.method != "GET" or DETOUR["left"] == 0:
+        return None
+    if DETOUR["left"] > 0:
+        DETOUR["left"] -= 1
+    return RedirectResponse(MESSAGES_PATH, 302)
 
 
 @app.get("/captcha.png")
@@ -102,6 +122,8 @@ async def basket(request: Request):
     when the arrow (image button) next to it is pressed."""
     if request.cookies.get("auth") != "ok":
         return RedirectResponse("/", 302)
+    if detour := _detour(request):
+        return detour
     f = dict(await request.form()) if request.method == "POST" else {}
     state["basket_loads"] += 1
     date = f.get("shown_date", "1405/08/02")
@@ -157,6 +179,8 @@ WEEK_CANCELS: list[tuple[str, str]] = []  # (date, meal) unticked and saved
 async def reservation(request: Request):
     if request.cookies.get("auth") != "ok":
         return RedirectResponse("/", 302)
+    if detour := _detour(request):
+        return detour
     f = dict(await request.form()) if request.method == "POST" else {}
     week = int(f.get("week", "0"))
     if "next.x" in f or "next" in f:
@@ -227,6 +251,8 @@ async def basket_sale(request: Request):
     clearing "reserved"."""
     if request.cookies.get("auth") != "ok":
         return RedirectResponse("/", 302)
+    if detour := _detour(request):
+        return detour
     f = dict(await request.form()) if request.method == "POST" else {}
     date, meal_no = f.get("ctl00$cphMain$txtDate", "1405/08/06"), f.get("ctl00$cphMain$drpFoodType", "1")
     meal = MEALS[int(meal_no) - 1] if meal_no in ("1", "2", "3") else ""
